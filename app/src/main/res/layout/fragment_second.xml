@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:orientation="vertical"
+    android:background="#FAFAFA"
+    android:padding="16dp"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/textUser"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Usuario"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:textColor="#333"
+        android:padding="12dp"
+        android:background="@drawable/rounded_bg"
+        android:elevation="2dp"
+        android:layout_marginBottom="16dp" />
+
+    <FrameLayout
+        android:id="@+id/mapContainer"
+        android:layout_width="match_parent"
+        android:layout_height="400dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="16dp"
+        android:background="#E0E0E0"
+        android:elevation="4dp">
+
+        <org.osmdroid.views.MapView
+            android:id="@+id/mapView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <Button
+            android:id="@+id/buttonMyLocation"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="16dp"
+            android:background="@drawable/ic_my_location"
+            android:contentDescription="Mi ubicación"
+            android:elevation="4dp" />
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginTop="8dp">
+
+        <Button
+            android:id="@+id/buttonZonaSegura"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="Establecer Zona Segura"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/rounded_button"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#4CAF50"
+            android:textAllCaps="false"
+            android:elevation="2dp" />
+
+        <Button
+            android:id="@+id/buttonDescargarOffline"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="Descargar Mapa Offline"
+            android:background="@drawable/rounded_button"
+            android:layout_marginBottom="12dp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#1976D2"
+            android:textAllCaps="false"
+            android:elevation="2dp" />
+
+        <ProgressBar
+            android:id="@+id/progressBarDownload"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="8dp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone"
+            android:progressDrawable="@drawable/progress_bar_style" />
+        <Button
+            android:id="@+id/buttonAssociateDevice"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="Asociar Vehículo"
+            android:background="@drawable/rounded_button"
+            android:layout_marginBottom="12dp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#1976D2"
+            android:textAllCaps="false"
+            android:elevation="2dp" />
+        <TextView
+            android:id="@+id/textDeviceInfo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="No hay vehículo asociado"/>
+    </LinearLayout>
+    <Button
+        android:id="@+id/buttonLogout"
+        android:layout_width="100dp"
+        android:layout_height="60dp"
+        android:text="Cerrar Sesion"
+        android:background="@drawable/rounded_button"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="end|bottom"
+        android:backgroundTint="#1976D2"
+        android:textAllCaps="false"
+        android:elevation="2dp" />
+</LinearLayout>
