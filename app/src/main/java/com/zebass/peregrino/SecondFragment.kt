@@ -444,10 +444,30 @@ class SecondFragment : Fragment() {
         safeZone = null
         safeZonePolygon?.let { map?.overlays?.remove(it) }
         safeZonePolygon = null
-        sharedPreferences.edit().remove(PREF_SAFEZONE_LAT).remove(PREF_SAFEZONE_LON).apply()
+        sharedPreferences.edit()
+            .remove(PREF_SAFEZONE_LAT)
+            .remove(PREF_SAFEZONE_LON)
+            .apply()
         binding.buttonZonaSegura.text = "Set Safe Zone"
-        binding.buttonZonaSegura.setBackgroundColor(ContextCompat.getColor(requireContext(), android.R.color.holo_blue_dark))
+        binding.buttonZonaSegura.setBackgroundColor(
+            ContextCompat.getColor(requireContext(), android.R.color.holo_blue_dark)
+        )
+
+        // Show loading state
+        binding.buttonZonaSegura.text = "Deleting..."
+        binding.buttonZonaSegura.isEnabled = false
+
         viewModel.deleteSafeZoneFromServer()
+
+        // Reset button after operation completes
+        lifecycleScope.launch {
+            delay(2000) // Give time for operation to complete
+            if (isAdded) {
+                binding.buttonZonaSegura.text = "Set Safe Zone"
+                binding.buttonZonaSegura.isEnabled = true
+            }
+        }
+
         Log.d(TAG, "Safe zone toggled off")
     }
 
@@ -471,18 +491,23 @@ class SecondFragment : Fragment() {
         map?.invalidate()
         Log.d(TAG, "My location enabled")
     }
-
     private fun enterSafeZoneSetupMode() {
         if (!hasAssociatedDevice()) {
-            Snackbar.make(binding.root, "Please associate a vehicle first", Snackbar.LENGTH_SHORT).show()
-            Log.d(TAG, "Cannot set safe zone: no associated device")
+            Snackbar.make(binding.root, "Por favor, asocia un vehículo primero", Snackbar.LENGTH_SHORT).show()
+            Log.d(TAG, "No se puede establecer zona segura: no hay dispositivo asociado")
             return
         }
-        viewModel.showDeviceSelectionForSafeZone { deviceId ->
+
+        val deviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
+        if (deviceId != -1) {
+            Log.d(TAG, "Usando dispositivo asociado directamente: deviceId=$deviceId")
             establishSafeZoneForDevice(deviceId)
+        } else {
+            viewModel.showDeviceSelectionForSafeZone { selectedDeviceId ->
+                establishSafeZoneForDevice(selectedDeviceId)
+            }
         }
     }
-
     private fun establishSafeZoneForDevice(deviceId: Int) {
         binding.buttonZonaSegura.text = "Fetching vehicle location..."
         binding.buttonZonaSegura.isEnabled = false

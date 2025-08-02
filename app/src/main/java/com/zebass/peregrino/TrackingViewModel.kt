@@ -207,9 +207,11 @@ class TrackingViewModel : ViewModel() {
                 val deviceId = getDeviceId()
                 if (deviceId == -1) {
                     Log.d(TAG, "No device ID, skipping deleteSafeZoneFromServer")
+                    postError("No associated device found")
                     return@launch
                 }
 
+                Log.d(TAG, "Sending DELETE request for safe zone with deviceId=$deviceId")
                 val request = Request.Builder()
                     .url("$BASE_URL/api/safezone?deviceId=$deviceId")
                     .delete()
@@ -220,7 +222,8 @@ class TrackingViewModel : ViewModel() {
                 if (response.isSuccessful) {
                     Log.d(TAG, "Safe zone deleted from server for deviceId=$deviceId")
                 } else {
-                    val errorMsg = "Failed to delete safe zone: HTTP ${response.code}, body=${response.body?.string()}"
+                    val errorBody = response.body?.string() ?: "No response body"
+                    val errorMsg = "Failed to delete safe zone: HTTP ${response.code}, body=$errorBody"
                     postError(errorMsg)
                     Log.e(TAG, errorMsg)
                 }
@@ -230,7 +233,6 @@ class TrackingViewModel : ViewModel() {
             }
         }
     }
-
     fun associateDevice(deviceUniqueId: String, name: String, callback: (Int, String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -335,27 +337,38 @@ class TrackingViewModel : ViewModel() {
 
                 val response = client.newCall(request).execute()
                 if (response.isSuccessful) {
-                    val devicesArray = JSONArray(response.body?.string())
+                    val devicesArray = JSONArray(response.body?.string() ?: "[]")
                     if (devicesArray.length() == 0) {
                         postError("No se encontraron dispositivos asociados")
                         Log.e(TAG, "No associated devices found")
                         return@launch
                     }
 
-                    // Filtrar dispositivos duplicados por ID
                     val uniqueDevices = mutableMapOf<Int, Pair<String, Int>>()
                     for (i in 0 until devicesArray.length()) {
                         val device = devicesArray.getJSONObject(i)
-                        val id = device.getInt("id")
-                        val name = device.getString("name")
-                        uniqueDevices[id] = Pair(name, id)
+                        val id = device.optInt("id", -1)
+                        val name = device.optString("name", "Dispositivo Desconocido")
+                        val uniqueId = device.optString("uniqueId", "N/A")
+                        if (id != -1) {
+                            uniqueDevices[id] = Pair(name, id)
+                            Log.d(TAG, "Dispositivo procesado: id=$id, name=$name, uniqueId=$uniqueId")
+                        } else {
+                            Log.w(TAG, "Omitiendo dispositivo sin id: $device")
+                        }
+                    }
+
+                    if (uniqueDevices.isEmpty()) {
+                        postError("No se encontraron dispositivos válidos")
+                        Log.e(TAG, "No valid devices found in response")
+                        return@launch
                     }
 
                     val deviceNames = uniqueDevices.values.map { "${it.first} (ID: ${it.second})" }.toTypedArray()
                     val deviceIds = uniqueDevices.values.map { it.second }.toTypedArray()
 
                     withContext(Dispatchers.Main) {
-                        Log.d(TAG, "Showing device selection dialog with ${deviceIds.size} unique devices: ${deviceNames.joinToString()}")
+                        Log.d(TAG, "Mostrando diálogo de selección con ${deviceIds.size} dispositivos: ${deviceNames.joinToString()}")
                         MaterialAlertDialogBuilder(_context)
                             .setTitle("Seleccionar vehículo para la zona segura")
                             .setItems(deviceNames) { _, which -> callback(deviceIds[which]) }
@@ -363,7 +376,8 @@ class TrackingViewModel : ViewModel() {
                             .show()
                     }
                 } else {
-                    val errorMsg = "Error al cargar dispositivos: HTTP ${response.code}, body=${response.body?.string()}"
+                    val errorBody = response.body?.string() ?: "Sin cuerpo de respuesta"
+                    val errorMsg = "Error al cargar dispositivos: HTTP ${response.code}, body=$errorBody"
                     postError(errorMsg)
                     Log.e(TAG, errorMsg)
                 }
@@ -416,6 +430,7 @@ class TrackingViewModel : ViewModel() {
     fun setContext(context: Context) {
         _context = context
     }
+
 
     fun fetchAssociatedDevices() {
         viewModelScope.launch(Dispatchers.IO) {
