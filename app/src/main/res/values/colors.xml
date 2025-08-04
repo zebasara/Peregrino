@@ -7,10 +7,24 @@
     <color name="orange">#FF5722</color>
     <color name="green">#4CAF50</color>
 
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
 
-        <color name="purple_500">#FF6200EE</color>
-        <color name="purple_700">#FF3700B3</color>
-        <color name="teal_200">#FF03DAC5</color>
-        <color name="teal_700">#FF018786</color>
+    <!-- Primary colors -->
+    <color name="primary">#3F51B5</color> <!-- Material Indigo for buttons and icons -->
+    <color name="background_primary">#F5F5F5</color> <!-- Reemplazo de ?attr/colorSurface con gris claro -->
+    <color name="text_primary">#212121</color> <!-- Reemplazo de ?attr/colorOnSurface con gris oscuro -->
+    <color name="text_secondary">#757575</color> <!-- Reemplazo de ?attr/colorOnSurfaceVariant con gris medio -->
 
+    <!-- White variations for transparency and backgrounds -->
+    <color name="white_70">#B3FFFFFF</color> <!-- 70% opacity white for secondary text -->
+    <color name="white_95">#F2FFFFFF</color> <!-- 95% opacity white for card backgrounds -->
+    <color name="white_20">#33FFFFFF</color> <!-- 20% opacity white for button backgrounds -->
+
+    <!-- Other UI elements -->
+    <color name="gray">#757575</color> <!-- Gray for icons like device status -->
+    <color name="divider">#E0E0E0</color> <!-- Divider color for real-time status card -->
+    <color name="safe_zone_inactive">#0288D1</color> <!-- Light blue for safe zone button -->
 </resources>

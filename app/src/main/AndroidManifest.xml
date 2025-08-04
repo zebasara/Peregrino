@@ -2,14 +2,30 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Permisos básicos -->
+    <uses-feature
+        android:name="android.hardware.telephony"
+        android:required="false" />
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- Permisos para notificaciones y servicios -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- Required for OSMDroid to write cache files -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Permisos para alertas críticas -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- Para OSMDroid -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="true"
@@ -22,18 +38,16 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Peregrino"
         tools:targetApi="31">
+
+        <!-- OSMDroid configuration -->
         <meta-data
             android:name="osmdroid.basePath"
             android:value="osmdroid" />
         <meta-data
             android:name="osmdroid.cachePath"
             android:value="osmdroid/cache" />
-        <service
-            android:name=".service.TrackingService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="location"
-            tools:ignore="ForegroundServicePermission" />
+
+        <!-- Main Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -43,5 +57,30 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Alert Activity -->
+        <activity
+            android:name=".service.AlertActivity"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:exported="false" />
+
+        <!-- Tracking Service -->
+        <service
+            android:name=".service.TrackingService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="location"
+            tools:ignore="ForegroundServicePermission" />
+
+        <!-- Alert Stop Receiver -->
+        <receiver
+            android:name=".service.AlertStopReceiver"
+            android:exported="false" />
+
     </application>
+
 </manifest>

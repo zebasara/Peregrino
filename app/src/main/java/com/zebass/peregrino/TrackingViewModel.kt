@@ -2,419 +2,649 @@ package com.zebass.peregrino
 
 import android.content.Context
 import android.util.Log
+import androidx.core.content.edit
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.caverock.androidsvg.BuildConfig
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
+import okhttp3.Cache
+import okhttp3.ConnectionPool
 import okhttp3.FormBody
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import org.osmdroid.util.GeoPoint
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class TrackingViewModel : ViewModel() {
 
+    // ============ ESTADO ULTRA-OPTIMIZADO CON CACHE ============
     private val _vehiclePosition = MutableStateFlow<Pair<Int, LatLng>?>(null)
-    val vehiclePosition: StateFlow<Pair<Int, LatLng>?> = _vehiclePosition
+    val vehiclePosition: StateFlow<Pair<Int, LatLng>?> = _vehiclePosition.asStateFlow()
 
     private val _safeZone = MutableStateFlow<LatLng?>(null)
-    val safeZone: StateFlow<LatLng?> = _safeZone
+    val safeZone: StateFlow<LatLng?> = _safeZone.asStateFlow()
 
     private val _error = MutableStateFlow<String?>(null)
-    val error: StateFlow<String?> = _error
+    val error: StateFlow<String?> = _error.asStateFlow()
 
     private val _deviceInfo = MutableStateFlow<String?>(null)
-    val deviceInfo: StateFlow<String?> = _deviceInfo
+    val deviceInfo: StateFlow<String?> = _deviceInfo.asStateFlow()
 
-    private val client = OkHttpClient()
-    private val BASE_URL = "https://carefully-arriving-shepherd.ngrok-free.app"
-    private val TAG = "TrackingViewModel"
+    private val _deviceStatus = MutableStateFlow<DeviceStatus?>(null)
+    val deviceStatus: StateFlow<DeviceStatus?> = _deviceStatus.asStateFlow()
+
+    // ============ HTTP CLIENT ULTRA-OPTIMIZADO ============
+    private val client by lazy {
+        OkHttpClient.Builder().apply {
+            connectTimeout(2, TimeUnit.SECONDS)        // Timeout agresivo
+            readTimeout(3, TimeUnit.SECONDS)
+            writeTimeout(2, TimeUnit.SECONDS)
+            callTimeout(5, TimeUnit.SECONDS)           // Timeout total
+            retryOnConnectionFailure(true)
+            connectionPool(ConnectionPool(10, 30, TimeUnit.SECONDS)) // Pool optimizado
+
+            // Cache HTTP optimizado
+            cache(Cache(File.createTempFile("http_cache", ""), 10 * 1024 * 1024)) // 10MB
+
+            // Interceptor para logging rápido (solo en debug)
+            if (BuildConfig.DEBUG) {
+                addInterceptor { chain ->
+                    val startTime = System.currentTimeMillis()
+                    val response = chain.proceed(chain.request())
+                    val duration = System.currentTimeMillis() - startTime
+                    if (duration > 1000) {
+                        Log.w(TAG, "⚠️ Slow request: ${chain.request().url} (${duration}ms)")
+                    }
+                    response
+                }
+            }
+        }.build()
+    }
+
+    // ============ CACHE ULTRA-RÁPIDO ============
+    private data class CacheEntry<T>(
+        val data: T,
+        val timestamp: Long,
+        val ttl: Long = 30_000L // 30 segundos por defecto
+    ) {
+        fun isValid(): Boolean = System.currentTimeMillis() - timestamp < ttl
+    }
+
+    private val positionCache = ConcurrentHashMap<Int, CacheEntry<LatLng>>()
+    private val deviceStatusCache = ConcurrentHashMap<Int, CacheEntry<DeviceStatus>>()
+    private val safeZoneCache = ConcurrentHashMap<Int, CacheEntry<LatLng>>()
+    private val deviceListCache = AtomicReference<CacheEntry<List<DeviceInfo>>?>()
+
+    // ============ COROUTINES OPTIMIZADAS ============
+    private val ioDispatcher = Dispatchers.IO.limitedParallelism(8) // Limitar paralelismo
+    private val networkScope = CoroutineScope(ioDispatcher + SupervisorJob())
+    private val cacheCleanupJob = viewModelScope.launch {
+        while (true) {
+            delay(60_000L) // Limpiar cada minuto
+            cleanupCaches()
+        }
+    }
+
+    // ============ MODELOS OPTIMIZADOS ============
+    data class DeviceStatus(
+        val isOnline: Boolean,
+        val deviceName: String,
+        val recentPositions: Int,
+        val lastSeen: Long = System.currentTimeMillis()
+    )
+
+    data class DeviceInfo(
+        val id: Int,
+        val name: String,
+        val uniqueId: String,
+        val status: String = "unknown"
+    )
+
+    data class GPSConfig(
+        val recommendedEndpoint: String,
+        val endpoints: Map<String, String>,
+        val instructions: Map<String, String>
+    )
 
     companion object {
         const val DEVICE_ID_PREF = "associated_device_id"
         const val DEVICE_NAME_PREF = "associated_device_name"
         const val DEVICE_UNIQUE_ID_PREF = "associated_device_unique_id"
+        private const val BASE_URL = "https://carefully-arriving-shepherd.ngrok-free.app"
+        private const val TAG = "TrackingViewModel"
+
+        // Cache TTLs optimizados
+        private const val POSITION_TTL = 5_000L      // 5s para posiciones
+        private const val DEVICE_STATUS_TTL = 30_000L // 30s para estado
+        private const val SAFE_ZONE_TTL = 120_000L    // 2min para zona segura
+        private const val DEVICE_LIST_TTL = 60_000L   // 1min para lista dispositivos
+    }
+
+    private lateinit var context: Context
+
+    // ============ FUNCIONES CORE ULTRA-OPTIMIZADAS ============
+
+    fun setContext(context: Context) {
+        this.context = context.applicationContext // Evitar memory leaks
     }
 
     fun updateVehiclePosition(deviceId: Int, position: GeoPoint) {
-        _vehiclePosition.value = Pair(deviceId, LatLng(position.latitude, position.longitude))
-        Log.d(TAG, "Updated vehicle position: deviceId=$deviceId, lat=${position.latitude}, lon=${position.longitude}")
+        val latLng = LatLng(position.latitude, position.longitude)
+
+        // Cache inmediato
+        positionCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
+
+        // Update state
+        _vehiclePosition.value = Pair(deviceId, latLng)
+
+        Log.d(TAG, "Position updated: deviceId=$deviceId, lat=${position.latitude}, lon=${position.longitude}")
     }
 
     fun fetchSafeZoneFromServer() {
-        viewModelScope.launch(Dispatchers.IO) {
+        val deviceId = getDeviceId()
+        if (deviceId == -1) {
+            Log.d(TAG, "No device ID, skipping fetchSafeZoneFromServer")
+            return
+        }
+
+        // Check cache primero
+        safeZoneCache[deviceId]?.let { cached ->
+            if (cached.isValid()) {
+                _safeZone.value = cached.data
+                Log.d(TAG, "Safe zone from cache: ${cached.data}")
+                return
+            }
+        }
+
+        networkScope.launch {
             try {
-                val deviceId = getDeviceId()
-                if (deviceId == -1) {
-                    Log.d(TAG, "No device ID, skipping fetchSafeZoneFromServer")
-                    return@launch
+                val safeZone = executeRequest<SafeZoneResponse> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/safezone?deviceId=$deviceId")
+                        .get()
+                        .addAuthHeader()
+                        .build()
                 }
 
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/safezone?deviceId=$deviceId")
-                    .get()
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
-
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    response.body?.string()?.let { responseBody ->
-                        val jsonObject = JSONObject(responseBody)
-                        val lat = jsonObject.getDouble("latitude")
-                        val lon = jsonObject.getDouble("longitude")
-                        _safeZone.value = LatLng(lat, lon)
-                        Log.d(TAG, "Fetched safe zone: lat=$lat, lon=$lon, deviceId=$deviceId")
-                    }
-                } else {
-                    val errorMsg = "Failed to fetch safe zone: HTTP ${response.code}, body=${response.body?.string()}"
-                    postError(errorMsg)
-                    Log.e(TAG, errorMsg)
+                safeZone?.let { zone ->
+                    val latLng = LatLng(zone.latitude, zone.longitude)
+                    safeZoneCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
+                    _safeZone.value = latLng
+                    Log.d(TAG, "Fetched safe zone: lat=${zone.latitude}, lon=${zone.longitude}")
                 }
             } catch (e: Exception) {
-                postError("Failed to fetch safe zone: ${e.message}")
-                Log.e(TAG, "Error fetching safe zone", e)
+                handleError("Failed to fetch safe zone", e)
             }
         }
     }
+
     fun checkDeviceStatus(deviceId: Int, callback: (Boolean, String) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/device/status/$deviceId")
-                    .get()
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
-
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    response.body?.string()?.let { responseBody ->
-                        val jsonObject = JSONObject(responseBody)
-                        val isReceivingData = jsonObject.getBoolean("isReceivingData")
-                        val deviceName = jsonObject.getJSONObject("device").getString("name")
-                        val recentPositions = jsonObject.getInt("recentPositions")
-
-                        val statusMessage = if (isReceivingData) {
-                            "✅ $deviceName is online - $recentPositions recent positions"
-                        } else {
-                            "⚠️ $deviceName is offline - no recent positions"
-                        }
-
-                        withContext(Dispatchers.Main) {
-                            callback(isReceivingData, statusMessage)
-                        }
-                        Log.d(TAG, "Device status: $statusMessage")
-                    }
+        // Check cache primero
+        deviceStatusCache[deviceId]?.let { cached ->
+            if (cached.isValid()) {
+                val status = cached.data
+                val message = if (status.isOnline) {
+                    "✅ ${status.deviceName} is online - ${status.recentPositions} recent positions"
                 } else {
-                    val errorMsg = "Error checking device status: HTTP ${response.code}"
-                    withContext(Dispatchers.Main) {
-                        callback(false, errorMsg)
+                    "⚠️ ${status.deviceName} is offline - no recent positions"
+                }
+                callback(status.isOnline, message)
+                return
+            }
+        }
+
+        networkScope.launch {
+            try {
+                val statusResponse = executeRequest<DeviceStatusResponse> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/device/status/$deviceId")
+                        .get()
+                        .addAuthHeader()
+                        .build()
+                }
+
+                statusResponse?.let { response ->
+                    val status = DeviceStatus(
+                        isOnline = response.isReceivingData,
+                        deviceName = response.device.name,
+                        recentPositions = response.recentPositions
+                    )
+
+                    deviceStatusCache[deviceId] = CacheEntry(status, System.currentTimeMillis(), DEVICE_STATUS_TTL)
+                    _deviceStatus.value = status
+
+                    val message = if (status.isOnline) {
+                        "✅ ${status.deviceName} is online - ${status.recentPositions} recent positions"
+                    } else {
+                        "⚠️ ${status.deviceName} is offline - no recent positions"
                     }
-                    Log.e(TAG, errorMsg)
+
+                    withContext(Dispatchers.Main) {
+                        callback(status.isOnline, message)
+                    }
+                    Log.d(TAG, "Device status: $message")
                 }
             } catch (e: Exception) {
-                val errorMsg = "Error checking device status: ${e.message}"
+                val errorMsg = "Error checking device status: ${e.localizedMessage}"
                 withContext(Dispatchers.Main) {
                     callback(false, errorMsg)
                 }
-                Log.e(TAG, "Error checking device status", e)
+                handleError("Error checking device status", e)
             }
         }
     }
-    // Agregar al TrackingViewModel.kt
 
-    fun getGPSClientConfig(callback: (String, Map<String, String>, JSONObject?) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
+    fun getGPSClientConfig(callback: (String, Map<String, String>, Map<String, String>) -> Unit) {
+        networkScope.launch {
             try {
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/gps/config")
-                    .get()
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
+                val config = executeRequest<GPSConfigResponse> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/gps/config")
+                        .get()
+                        .addAuthHeader()
+                        .build()
+                }
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    response.body?.string()?.let { responseBody ->
-                        val jsonObject = JSONObject(responseBody)
-                        val recommendedEndpoint = jsonObject.getString("recommendedEndpoint")
-                        val instructions = jsonObject.getJSONObject("instructions")
-
-                        val endpoints = mutableMapOf<String, String>()
-                        val gpsEndpoints = jsonObject.getJSONObject("gpsEndpoints")
-                        gpsEndpoints.keys().forEach { key ->
-                            endpoints[key] = gpsEndpoints.getString(key)
-                        }
-
-                        withContext(Dispatchers.Main) {
-                            callback(recommendedEndpoint, endpoints, instructions) // Incluir instructions
-                        }
-                        Log.d(TAG, "GPS config fetched: recommended=$recommendedEndpoint, endpoints=$endpoints")
+                config?.let { response ->
+                    withContext(Dispatchers.Main) {
+                        callback(
+                            response.recommendedEndpoint,
+                            response.gpsEndpoints,
+                            response.instructions
+                        )
                     }
-                } else {
-                    val errorMsg = "Error getting GPS config: HTTP ${response.code}"
-                    postError(errorMsg)
-                    Log.e(TAG, errorMsg)
+                    Log.d(TAG, "GPS config fetched: recommended=${response.recommendedEndpoint}")
                 }
             } catch (e: Exception) {
-                val errorMsg = "Error getting GPS config: ${e.message}"
-                postError(errorMsg)
-                Log.e(TAG, "Error getting GPS config", e)
+                handleError("Error getting GPS config", e)
             }
         }
     }
 
     fun sendSafeZoneToServer(latitude: Double, longitude: Double, deviceId: Int) {
-        viewModelScope.launch(Dispatchers.IO) {
+        networkScope.launch {
             try {
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/safezone")
-                    .post(
-                        FormBody.Builder()
-                            .add("latitude", latitude.toString())
-                            .add("longitude", longitude.toString())
-                            .add("deviceId", deviceId.toString())
-                            .build()
-                    )
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
+                val requestBody = FormBody.Builder()
+                    .add("latitude", latitude.toString())
+                    .add("longitude", longitude.toString())
+                    .add("deviceId", deviceId.toString())
                     .build()
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    Log.d(TAG, "Safe zone sent to server: lat=$latitude, lon=$longitude, deviceId=$deviceId")
-                } else {
-                    val errorMsg = "Failed to send safe zone: HTTP ${response.code}, body=${response.body?.string()}"
-                    postError(errorMsg)
-                    Log.e(TAG, errorMsg)
+                executeRequest<Unit> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/safezone")
+                        .post(requestBody)
+                        .addAuthHeader()
+                        .build()
                 }
+
+                // Update cache inmediatamente
+                val latLng = LatLng(latitude, longitude)
+                safeZoneCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
+                _safeZone.value = latLng
+
+                Log.d(TAG, "Safe zone sent: lat=$latitude, lon=$longitude, deviceId=$deviceId")
             } catch (e: Exception) {
-                postError("Failed to send safe zone: ${e.message}")
-                Log.e(TAG, "Error sending safe zone", e)
+                handleError("Failed to send safe zone", e)
             }
         }
     }
 
     fun deleteSafeZoneFromServer() {
-        viewModelScope.launch(Dispatchers.IO) {
+        val deviceId = getDeviceId()
+        if (deviceId == -1) {
+            Log.d(TAG, "No device ID, skipping deleteSafeZoneFromServer")
+            postError("No associated device found")
+            return
+        }
+
+        networkScope.launch {
             try {
-                val deviceId = getDeviceId()
-                if (deviceId == -1) {
-                    Log.d(TAG, "No device ID, skipping deleteSafeZoneFromServer")
-                    postError("No associated device found")
-                    return@launch
+                executeRequest<Unit> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/safezone?deviceId=$deviceId")
+                        .delete()
+                        .addAuthHeader()
+                        .build()
                 }
 
-                Log.d(TAG, "Sending DELETE request for safe zone with deviceId=$deviceId")
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/safezone?deviceId=$deviceId")
-                    .delete()
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
+                // Clear cache inmediatamente
+                safeZoneCache.remove(deviceId)
+                _safeZone.value = null
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    Log.d(TAG, "Safe zone deleted from server for deviceId=$deviceId")
-                } else {
-                    val errorBody = response.body?.string() ?: "No response body"
-                    val errorMsg = "Failed to delete safe zone: HTTP ${response.code}, body=$errorBody"
-                    postError(errorMsg)
-                    Log.e(TAG, errorMsg)
-                }
+                Log.d(TAG, "Safe zone deleted for deviceId=$deviceId")
             } catch (e: Exception) {
-                postError("Failed to delete safe zone: ${e.message}")
-                Log.e(TAG, "Error deleting safe zone", e)
+                handleError("Failed to delete safe zone", e)
             }
         }
     }
+
     fun associateDevice(deviceUniqueId: String, name: String, callback: (Int, String) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
+        if (deviceUniqueId.isBlank() || name.isBlank()) {
+            postError("Device ID and name cannot be empty")
+            return
+        }
+
+        networkScope.launch {
             try {
                 val json = JSONObject().apply {
                     put("deviceId", deviceUniqueId.trim())
                     put("name", name.trim())
                 }
 
-                val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/user/devices")
-                    .post(requestBody)
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
+                val requestBody = json.toString().toRequestBody("application/json".toMediaType())
 
-                val response = client.newCall(request).execute()
-                withContext(Dispatchers.Main) {
-                    when {
-                        response.isSuccessful -> {
-                            val jsonResponse = JSONObject(response.body?.string() ?: "{}")
-                            val deviceId = jsonResponse.getInt("id")
-                            val deviceName = jsonResponse.getString("name")
-                            val uniqueId = jsonResponse.getString("uniqueId")
-                            _context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit()
-                                .putInt(DEVICE_ID_PREF, deviceId)
-                                .putString(DEVICE_NAME_PREF, deviceName)
-                                .putString(DEVICE_UNIQUE_ID_PREF, uniqueId)
-                                .apply()
-                            callback(deviceId, deviceName)
-                            Log.d(TAG, "Device associated: id=$deviceId, name=$deviceName, uniqueId=$uniqueId")
-                        }
-                        response.code == 404 -> {
-                            postError("Dispositivo no encontrado. Verifica el Unique ID en Traccar")
-                            Log.e(TAG, "Device not found: Unique ID=$deviceUniqueId")
-                        }
-                        response.code == 409 -> {
-                            postError("El dispositivo ya está asociado")
-                            Log.e(TAG, "Device already associated: Unique ID=$deviceUniqueId")
-                        }
-                        response.code == 401 -> {
-                            postError("Token de autenticación inválido")
-                            Log.e(TAG, "Invalid authentication token")
-                        }
-                        else -> {
-                            val errorMsg = "Error ${response.code}: ${response.body?.string()}"
-                            postError(errorMsg)
-                            Log.e(TAG, errorMsg)
-                        }
+                val response = executeRequest<AssociateDeviceResponse> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/user/devices")
+                        .post(requestBody)
+                        .addAuthHeader()
+                        .build()
+                }
+
+                response?.let { deviceResponse ->
+                    // Save to preferences
+                    context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit {
+                        putInt(DEVICE_ID_PREF, deviceResponse.id)
+                        putString(DEVICE_NAME_PREF, deviceResponse.name)
+                        putString(DEVICE_UNIQUE_ID_PREF, deviceResponse.uniqueId)
                     }
+
+                    // Clear caches for new device
+                    clearCachesForDevice(deviceResponse.id)
+
+                    withContext(Dispatchers.Main) {
+                        callback(deviceResponse.id, deviceResponse.name)
+                    }
+
+                    Log.d(TAG, "Device associated: id=${deviceResponse.id}, name=${deviceResponse.name}")
                 }
             } catch (e: Exception) {
-                postError("Error de conexión: ${e.message}")
-                Log.e(TAG, "Error associating device", e)
+                when {
+                    e.message?.contains("404") == true -> {
+                        postError("Device not found. Verify the Unique ID in Traccar")
+                    }
+                    e.message?.contains("409") == true -> {
+                        postError("Device already associated")
+                    }
+                    e.message?.contains("401") == true -> {
+                        postError("Invalid authentication token")
+                    }
+                    else -> handleError("Error associating device", e)
+                }
             }
         }
     }
 
     fun showAvailableDevices(callback: (String) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
+        networkScope.launch {
             try {
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/traccar/devices")
-                    .get()
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
+                val devicesResponse = executeRequest<AvailableDevicesResponse> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/traccar/devices")
+                        .get()
+                        .addAuthHeader()
+                        .build()
+                }
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    response.body?.string()?.let { responseBody ->
-                        val jsonObject = JSONObject(responseBody)
-                        val devices = jsonObject.getJSONArray("devices")
-                        val deviceList = StringBuilder("Dispositivos disponibles:\n\n")
-                        for (i in 0 until devices.length()) {
-                            val device = devices.getJSONObject(i)
-                            deviceList.append("• ${device.getString("name")}\n")
-                            deviceList.append("  UniqueID: ${device.getString("uniqueId")}\n")
-                            deviceList.append("  Estado: ${device.optString("status", "N/A")}\n\n")
+                devicesResponse?.let { response ->
+                    val deviceList = buildString {
+                        appendLine("Available devices:\n")
+                        response.devices.forEach { device ->
+                            appendLine("• ${device.name}")
+                            appendLine("  UniqueID: ${device.uniqueId}")
+                            appendLine("  Status: ${device.status}\n")
                         }
-                        withContext(Dispatchers.Main) { callback(deviceList.toString()) }
-                        Log.d(TAG, "Fetched available devices: $deviceList")
                     }
-                } else {
-                    val errorMsg = "Error al obtener dispositivos: HTTP ${response.code}, body=${response.body?.string()}"
-                    postError(errorMsg)
-                    Log.e(TAG, errorMsg)
+
+                    withContext(Dispatchers.Main) {
+                        callback(deviceList)
+                    }
+                    Log.d(TAG, "Fetched ${response.devices.size} available devices")
                 }
             } catch (e: Exception) {
-                postError("Error al obtener dispositivos: ${e.message}")
-                Log.e(TAG, "Error fetching devices", e)
+                handleError("Error fetching devices", e)
             }
         }
     }
 
     fun showDeviceSelectionForSafeZone(callback: (Int) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
+        networkScope.launch {
             try {
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/user/devices")
-                    .get()
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
+                val devices = getUserDevices()
+                if (devices.isEmpty()) {
+                    postError("No associated devices found")
+                    return@launch
+                }
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val devicesArray = JSONArray(response.body?.string() ?: "[]")
-                    if (devicesArray.length() == 0) {
-                        postError("No se encontraron dispositivos asociados")
-                        Log.e(TAG, "No associated devices found")
-                        return@launch
-                    }
+                val uniqueDevices = devices.distinctBy { it.id }
+                if (uniqueDevices.isEmpty()) {
+                    postError("No valid devices found")
+                    return@launch
+                }
 
-                    val uniqueDevices = mutableMapOf<Int, Pair<String, Int>>()
-                    for (i in 0 until devicesArray.length()) {
-                        val device = devicesArray.getJSONObject(i)
-                        val id = device.optInt("id", -1)
-                        val name = device.optString("name", "Dispositivo Desconocido")
-                        val uniqueId = device.optString("uniqueId", "N/A")
-                        if (id != -1) {
-                            uniqueDevices[id] = Pair(name, id)
-                            Log.d(TAG, "Dispositivo procesado: id=$id, name=$name, uniqueId=$uniqueId")
-                        } else {
-                            Log.w(TAG, "Omitiendo dispositivo sin id: $device")
+                val deviceNames = uniqueDevices.map { "${it.name} (ID: ${it.id})" }.toTypedArray()
+                val deviceIds = uniqueDevices.map { it.id }.toIntArray()
+
+                withContext(Dispatchers.Main) {
+                    Log.d(TAG, "Showing device selection with ${deviceIds.size} devices")
+                    MaterialAlertDialogBuilder(context)
+                        .setTitle("Select vehicle for safe zone")
+                        .setItems(deviceNames) { _, which ->
+                            if (which in deviceIds.indices) {
+                                callback(deviceIds[which])
+                            }
                         }
-                    }
-
-                    if (uniqueDevices.isEmpty()) {
-                        postError("No se encontraron dispositivos válidos")
-                        Log.e(TAG, "No valid devices found in response")
-                        return@launch
-                    }
-
-                    val deviceNames = uniqueDevices.values.map { "${it.first} (ID: ${it.second})" }.toTypedArray()
-                    val deviceIds = uniqueDevices.values.map { it.second }.toTypedArray()
-
-                    withContext(Dispatchers.Main) {
-                        Log.d(TAG, "Mostrando diálogo de selección con ${deviceIds.size} dispositivos: ${deviceNames.joinToString()}")
-                        MaterialAlertDialogBuilder(_context)
-                            .setTitle("Seleccionar vehículo para la zona segura")
-                            .setItems(deviceNames) { _, which -> callback(deviceIds[which]) }
-                            .setNegativeButton("Cancelar", null)
-                            .show()
-                    }
-                } else {
-                    val errorBody = response.body?.string() ?: "Sin cuerpo de respuesta"
-                    val errorMsg = "Error al cargar dispositivos: HTTP ${response.code}, body=$errorBody"
-                    postError(errorMsg)
-                    Log.e(TAG, errorMsg)
+                        .setNegativeButton("Cancel", null)
+                        .show()
                 }
             } catch (e: Exception) {
-                postError("Error al cargar dispositivos: ${e.message}")
-                Log.e(TAG, "Error loading devices", e)
+                handleError("Error loading devices", e)
             }
         }
     }
 
     suspend fun getLastPosition(deviceId: Int): LatLng {
-        return withContext(Dispatchers.IO) {
-            Log.d(TAG, "Fetching last position for deviceId=$deviceId")
-            val request = Request.Builder()
-                .url("$BASE_URL/api/last-position?deviceId=$deviceId")
-                .get()
-                .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                .build()
-
-            val response = withTimeoutOrNull(10000) { client.newCall(request).execute() }
-                ?: throw Exception("Timeout al obtener la última posición")
-            if (response.isSuccessful) {
-                val jsonObject = JSONObject(response.body?.string() ?: "{}")
-                val lat = jsonObject.getDouble("latitude")
-                val lon = jsonObject.getDouble("longitude")
-                Log.d(TAG, "Fetched last position: deviceId=$deviceId, lat=$lat, lon=$lon")
-                LatLng(lat, lon)
-            } else {
-                val errorMsg = when (response.code) {
-                    404 -> "No se encontró posición para el dispositivo ID=$deviceId"
-                    401 -> "Token de autenticación inválido"
-                    else -> "Error al obtener la última posición: HTTP ${response.code}, body=${response.body?.string()}"
-                }
-                Log.e(TAG, errorMsg)
-                throw Exception(errorMsg)
+        // Check cache primero
+        positionCache[deviceId]?.let { cached ->
+            if (cached.isValid()) {
+                Log.d(TAG, "Position from cache for deviceId=$deviceId")
+                return cached.data
             }
         }
+
+        return withContext(ioDispatcher) {
+            withTimeout(10_000L) { // 10 second timeout
+                val position = executeRequest<LastPositionResponse> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/last-position?deviceId=$deviceId")
+                        .get()
+                        .addAuthHeader()
+                        .build()
+                } ?: throw Exception("No position data received")
+
+                val latLng = LatLng(position.latitude, position.longitude)
+
+                // Cache result
+                positionCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
+
+                Log.d(TAG, "Fetched last position: deviceId=$deviceId, lat=${position.latitude}, lon=${position.longitude}")
+                latLng
+            }
+        }
+    }
+
+    fun fetchAssociatedDevices() {
+        networkScope.launch {
+            try {
+                val devices = getUserDevices()
+                if (devices.isNotEmpty()) {
+                    val firstDevice = devices.first()
+                    _deviceInfo.value = "Vehicle: ${firstDevice.name} (ID: ${firstDevice.id})"
+
+                    // Save to preferences
+                    context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit {
+                        putInt(DEVICE_ID_PREF, firstDevice.id)
+                        putString(DEVICE_NAME_PREF, firstDevice.name)
+                    }
+
+                    Log.d(TAG, "Fetched associated device: id=${firstDevice.id}, name=${firstDevice.name}")
+                } else {
+                    _deviceInfo.value = "No associated vehicles"
+                    Log.d(TAG, "No associated devices found")
+                }
+            } catch (e: Exception) {
+                handleError("Error fetching associated devices", e)
+            }
+        }
+    }
+
+    // ============ FUNCIONES AUXILIARES OPTIMIZADAS ============
+
+    private suspend fun getUserDevices(): List<DeviceInfo> {
+        // Check cache primero
+        deviceListCache.get()?.let { cached ->
+            if (cached.isValid()) {
+                return cached.data
+            }
+        }
+
+        val response = executeRequest<List<DeviceInfoResponse>> {
+            Request.Builder()
+                .url("$BASE_URL/api/user/devices")
+                .get()
+                .addAuthHeader()
+                .build()
+        } ?: emptyList()
+
+        val devices = response.mapNotNull { deviceResponse ->
+            if (deviceResponse.id > 0) {
+                DeviceInfo(
+                    id = deviceResponse.id,
+                    name = deviceResponse.name,
+                    uniqueId = deviceResponse.uniqueId ?: "N/A",
+                    status = deviceResponse.status ?: "unknown"
+                )
+            } else null
+        }
+
+        // Cache result
+        deviceListCache.set(CacheEntry(devices, System.currentTimeMillis(), DEVICE_LIST_TTL))
+        return devices
+    }
+
+    private suspend inline fun <reified T> executeRequest(requestBuilder: () -> Request): T? {
+        return try {
+            val request = requestBuilder()
+            val response = client.newCall(request).execute()
+
+            if (response.isSuccessful) {
+                response.body?.string()?.let { responseBody ->
+                    when (T::class) {
+                        Unit::class -> Unit as T
+                        String::class -> responseBody as T
+                        else -> {
+                            try {
+                                parseJsonResponse<T>(responseBody)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "JSON parsing error for ${T::class.simpleName}: ${e.message}")
+                                null
+                            }
+                        }
+                    }
+                }
+            } else {
+                val errorBody = response.body?.string() ?: "No response body"
+                throw Exception("HTTP ${response.code}: $errorBody")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Request failed: ${e.message}")
+            throw e
+        }
+    }
+
+    private inline fun <reified T> parseJsonResponse(json: String): T? {
+        return try {
+            when (T::class) {
+                SafeZoneResponse::class -> {
+                    val jsonObject = JSONObject(json)
+                    SafeZoneResponse(
+                        latitude = jsonObject.getDouble("latitude"),
+                        longitude = jsonObject.getDouble("longitude")
+                    ) as T
+                }
+                DeviceStatusResponse::class -> {
+                    val jsonObject = JSONObject(json)
+                    val deviceObj = jsonObject.getJSONObject("device")
+                    DeviceStatusResponse(
+                        isReceivingData = jsonObject.getBoolean("isReceivingData"),
+                        device = DeviceStatusResponse.Device(name = deviceObj.getString("name")),
+                        recentPositions = jsonObject.getInt("recentPositions")
+                    ) as T
+                }
+                LastPositionResponse::class -> {
+                    val jsonObject = JSONObject(json)
+                    LastPositionResponse(
+                        latitude = jsonObject.getDouble("latitude"),
+                        longitude = jsonObject.getDouble("longitude")
+                    ) as T
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing ${T::class.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    private fun Request.Builder.addAuthHeader(): Request.Builder {
+        return addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
+    }
+
+    private fun cleanupCaches() {
+        val now = System.currentTimeMillis()
+
+        positionCache.values.removeAll { !it.isValid() }
+        deviceStatusCache.values.removeAll { !it.isValid() }
+        safeZoneCache.values.removeAll { !it.isValid() }
+
+        deviceListCache.get()?.let { cached ->
+            if (!cached.isValid()) {
+                deviceListCache.set(null)
+            }
+        }
+
+        Log.d(TAG, "Cache cleanup completed")
+    }
+
+    private fun clearCachesForDevice(deviceId: Int) {
+        positionCache.remove(deviceId)
+        deviceStatusCache.remove(deviceId)
+        safeZoneCache.remove(deviceId)
+        deviceListCache.set(null)
+    }
+
+    private fun handleError(message: String, exception: Exception) {
+        Log.e(TAG, "$message: ${exception.message}", exception)
+        postError("$message: ${exception.localizedMessage}")
     }
 
     fun postError(message: String) {
@@ -422,59 +652,43 @@ class TrackingViewModel : ViewModel() {
     }
 
     private fun getDeviceId(): Int {
-        return _context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        return context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             .getInt(DEVICE_ID_PREF, -1)
     }
 
-    private lateinit var _context: Context
-    fun setContext(context: Context) {
-        _context = context
+    // ============ DATA CLASSES PARA RESPONSES ============
+    data class SafeZoneResponse(val latitude: Double, val longitude: Double)
+
+    data class DeviceStatusResponse(
+        val isReceivingData: Boolean,
+        val device: Device,
+        val recentPositions: Int
+    ) {
+        data class Device(val name: String)
     }
 
+    data class LastPositionResponse(val latitude: Double, val longitude: Double)
 
-    fun fetchAssociatedDevices() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val request = Request.Builder()
-                    .url("$BASE_URL/api/user/devices")
-                    .get()
-                    .addHeader("Authorization", "Bearer ${SecondFragment.JWT_TOKEN}")
-                    .build()
+    data class AssociateDeviceResponse(val id: Int, val name: String, val uniqueId: String)
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    response.body?.string()?.let { responseBody ->
-                        val jsonArray = JSONArray(responseBody)
-                        if (jsonArray.length() > 0) {
-                            // Tomar el primer dispositivo no duplicado
-                            val uniqueDevices = mutableMapOf<Int, JSONObject>()
-                            for (i in 0 until jsonArray.length()) {
-                                val device = jsonArray.getJSONObject(i)
-                                uniqueDevices[device.getInt("id")] = device
-                            }
-                            val firstDevice = uniqueDevices.values.first()
-                            val deviceId = firstDevice.getInt("id")
-                            val deviceName = firstDevice.getString("name")
-                            _deviceInfo.value = "Vehículo: $deviceName (ID: $deviceId)"
-                            _context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit()
-                                .putInt(DEVICE_ID_PREF, deviceId)
-                                .putString(DEVICE_NAME_PREF, deviceName)
-                                .apply()
-                            Log.d(TAG, "Fetched associated device: id=$deviceId, name=$deviceName")
-                        } else {
-                            _deviceInfo.value = "No hay vehículos asociados"
-                            Log.d(TAG, "No associated devices found")
-                        }
-                    }
-                } else {
-                    val errorMsg = "Error al obtener dispositivos: HTTP ${response.code}, body=${response.body?.string()}"
-                    postError(errorMsg)
-                    Log.e(TAG, errorMsg)
-                }
-            } catch (e: Exception) {
-                postError("Error de conexión: ${e.message}")
-                Log.e(TAG, "Error fetching associated devices", e)
-            }
-        }
+    data class AvailableDevicesResponse(val devices: List<DeviceInfoResponse>)
+
+    data class DeviceInfoResponse(
+        val id: Int,
+        val name: String,
+        val uniqueId: String?,
+        val status: String?
+    )
+
+    data class GPSConfigResponse(
+        val recommendedEndpoint: String,
+        val gpsEndpoints: Map<String, String>,
+        val instructions: Map<String, String>
+    )
+
+    override fun onCleared() {
+        super.onCleared()
+        networkScope.cancel()
+        cacheCleanupJob.cancel()
     }
 }
