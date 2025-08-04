@@ -137,8 +137,8 @@ class SecondFragment : Fragment() {
         ) {
             enableMyLocation()
         } else {
-            showSnackbar("Location permission denied", Snackbar.LENGTH_LONG)
-            Log.e(TAG, "Location permission denied")
+            showSnackbar("Permiso de ubicación denegado", Snackbar.LENGTH_LONG)
+            Log.e(TAG, "Permiso de ubicación denegado")
         }
     }
 
@@ -167,7 +167,7 @@ class SecondFragment : Fragment() {
         Log.d(TAG, "onViewCreated: userEmail=$userEmail")
 
         // UI Setup inmediato
-        binding.textUser.text = "Welcome: $userEmail"
+        binding.textUser.text = "Bienvenido: $userEmail"
 
         // Inicialización paralela
         lifecycleScope.launch {
@@ -209,7 +209,7 @@ class SecondFragment : Fragment() {
             buttonDescargarOffline.visibility = View.GONE
             progressBarDownload.visibility = View.GONE
         }
-        Log.d(TAG, "Buttons initialized")
+        Log.d(TAG, "Botones inicializados")
     }
 
     private suspend fun setupMap() = withContext(Dispatchers.Main) {
@@ -225,7 +225,7 @@ class SecondFragment : Fragment() {
         }
 
         isMapReady.set(true)
-        Log.d(TAG, "Map initialized")
+        Log.d(TAG, "Mapa inicializado")
 
         // Cargar zona segura después de inicializar mapa
         loadSafeZone()
@@ -258,13 +258,27 @@ class SecondFragment : Fragment() {
                     safeZone = geoPoint
                     safeZoneCache.set(geoPoint)
                     updateSafeZoneUI(geoPoint)
+                } ?: run {
+                    // Limpiar zona segura si es null
+                    safeZone = null
+                    safeZoneCache.clear()
+                    safeZonePolygon.get()?.let { map?.overlays?.remove(it) }
+                    safeZonePolygon.set(null)
+                    updateSafeZoneButton(false)
+                    map?.postInvalidate()
                 }
             }
         }
 
         lifecycleScope.launch {
             viewModel.error.collectLatest { error ->
-                error?.let { showSnackbar(it, Snackbar.LENGTH_LONG) }
+                error?.let {
+                    showSnackbar(it, Snackbar.LENGTH_LONG)
+                    Log.e(TAG, "Error del ViewModel: $it")
+                    if (it.contains("401")) {
+                        handleUnauthorizedError()
+                    }
+                }
             }
         }
 
@@ -301,7 +315,7 @@ class SecondFragment : Fragment() {
         } else {
             requireContext().startService(intent)
         }
-        Log.d(TAG, "TrackingService started")
+        Log.d(TAG, "TrackingService iniciado")
     }
 
     private fun schedulePeriodicSync() {
@@ -315,15 +329,21 @@ class SecondFragment : Fragment() {
                 ExistingPeriodicWorkPolicy.KEEP,
                 syncWork
             )
-        Log.d(TAG, "Periodic sync scheduled")
+        Log.d(TAG, "Sincronización periódica programada")
     }
 
     // ============ WEBSOCKET ULTRA-OPTIMIZADO ============
 
     private fun setupWebSocket() {
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            showSnackbar("Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
+            handleUnauthorizedError()
+            return
+        }
+
         val deviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
         if (deviceId == -1) {
-            Log.e(TAG, "No device for WebSocket")
+            Log.e(TAG, "No hay dispositivo para WebSocket")
             return
         }
 
@@ -340,7 +360,7 @@ class SecondFragment : Fragment() {
 
     private fun createWebSocketListener(deviceId: Int) = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.d(TAG, "WebSocket connected")
+            Log.d(TAG, "WebSocket conectado")
             val message = JSONObject().apply {
                 put("type", "SUBSCRIBE_DEVICE")
                 put("deviceId", deviceId)
@@ -349,7 +369,7 @@ class SecondFragment : Fragment() {
             webSocket.send(message.toString())
 
             lifecycleScope.launch(Dispatchers.Main) {
-                showSnackbar("Connected - Receiving locations", Snackbar.LENGTH_SHORT)
+                showSnackbar("Conectado - Recibiendo ubicaciones", Snackbar.LENGTH_SHORT)
             }
         }
 
@@ -358,23 +378,23 @@ class SecondFragment : Fragment() {
                 val json = JSONObject(text)
                 when (json.getString("type")) {
                     "POSITION_UPDATE" -> handlePositionUpdate(json)
-                    "CONNECTION_CONFIRMED" -> Log.d(TAG, "Connection confirmed")
-                    "SUBSCRIPTION_CONFIRMED" -> Log.d(TAG, "Subscription confirmed")
+                    "CONNECTION_CONFIRMED" -> Log.d(TAG, "Conexión confirmada")
+                    "SUBSCRIPTION_CONFIRMED" -> Log.d(TAG, "Suscripción confirmada")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "WebSocket message error: ${e.message}")
+                Log.e(TAG, "Error en mensaje WebSocket: ${e.message}")
             }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.e(TAG, "WebSocket failure: ${t.message}")
+            Log.e(TAG, "Fallo en WebSocket: ${t.message}")
             if (shouldReconnect.get() && isAdded) {
                 scheduleReconnect()
             }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Log.d(TAG, "WebSocket closed: $code - $reason")
+            Log.d(TAG, "WebSocket cerrado: $code - $reason")
             if (shouldReconnect.get() && isAdded && code != 1000) {
                 scheduleReconnect()
             }
@@ -398,7 +418,7 @@ class SecondFragment : Fragment() {
         cancelReconnect()
         reconnectRunnable = Runnable {
             if (shouldReconnect.get() && isAdded) {
-                Log.d(TAG, "Reconnecting WebSocket...")
+                Log.d(TAG, "Reconectando WebSocket...")
                 setupWebSocket()
             }
         }
@@ -417,7 +437,7 @@ class SecondFragment : Fragment() {
 
         val storedDeviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
         if (deviceId != storedDeviceId) {
-            Log.d(TAG, "Ignoring position for device $deviceId (expected $storedDeviceId)")
+            Log.d(TAG, "Ignorando posición para dispositivo $deviceId (esperado $storedDeviceId)")
             return
         }
 
@@ -458,7 +478,7 @@ class SecondFragment : Fragment() {
     }
 
     private fun formatMarkerTitle(deviceId: Int, position: GeoPoint): String {
-        return "Vehicle ID: $deviceId\nLat: ${"%.6f".format(position.latitude)}\nLon: ${"%.6f".format(position.longitude)}"
+        return "Vehículo ID: $deviceId\nLat: ${"%.6f".format(position.latitude)}\nLon: ${"%.6f".format(position.longitude)}"
     }
 
     private fun checkSafeZone(position: GeoPoint, deviceId: Int) {
@@ -487,7 +507,7 @@ class SecondFragment : Fragment() {
             )
         )
         showSnackbar(
-            "ALERT! Vehicle $deviceId is ${"%.1f".format(distance)} meters away",
+            "¡ALERTA! El vehículo $deviceId está a ${"%.1f".format(distance)} metros",
             Snackbar.LENGTH_LONG
         )
     }
@@ -519,7 +539,7 @@ class SecondFragment : Fragment() {
 
     private fun updateSafeZoneButton(active: Boolean) {
         binding.buttonZonaSegura.apply {
-            text = if (active) "Safe Zone Active ✓" else "Set Safe Zone"
+            text = if (active) "Zona Segura Activa ✓" else "Establecer Zona Segura"
             setBackgroundColor(
                 ContextCompat.getColor(
                     requireContext(),
@@ -550,7 +570,7 @@ class SecondFragment : Fragment() {
         if (hasAssociatedDevice()) {
             val deviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
             val deviceName = sharedPreferences.getString(DEVICE_NAME_PREF, null)
-            val info = "Device: $deviceName (ID: $deviceId)"
+            val info = "Dispositivo: $deviceName (ID: $deviceId)"
             deviceInfoCache.set(info)
             updateDeviceInfoUI(info)
 
@@ -560,7 +580,7 @@ class SecondFragment : Fragment() {
                 fetchInitialPosition()
             }
         } else {
-            updateDeviceInfoUI("No devices associated")
+            updateDeviceInfoUI("No hay dispositivos asociados")
         }
     }
 
@@ -581,7 +601,8 @@ class SecondFragment : Fragment() {
                 val geoPoint = GeoPoint(position.latitude, position.longitude)
                 updateVehiclePosition(deviceId, geoPoint)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch initial position", e)
+                Log.e(TAG, "Fallo al obtener posición inicial", e)
+                showSnackbar("Error al obtener posición inicial: ${e.message}", Snackbar.LENGTH_LONG)
             }
         }
     }
@@ -590,20 +611,20 @@ class SecondFragment : Fragment() {
     private fun checkDeviceStatus() {
         val deviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
         if (deviceId == -1) {
-            showSnackbar("No device associated", Snackbar.LENGTH_SHORT)
+            showSnackbar("No hay dispositivo asociado", Snackbar.LENGTH_SHORT)
             return
         }
 
         // Throttling para evitar spam
         val now = System.currentTimeMillis()
         if (now - lastStatusCheck.get() < 5000L) {
-            showSnackbar("Please wait before checking again", Snackbar.LENGTH_SHORT)
+            showSnackbar("Espera antes de verificar nuevamente", Snackbar.LENGTH_SHORT)
             return
         }
         lastStatusCheck.set(now)
 
         // UI feedback inmediato
-        updateStatusUI("🔄 Checking device status...", android.R.color.darker_gray)
+        updateStatusUI("🔄 Verificando estado del dispositivo...", android.R.color.darker_gray)
 
         viewModel.checkDeviceStatus(deviceId) { isOnline, message ->
             val statusIcon = if (isOnline) "🟢" else "🔴"
@@ -677,7 +698,7 @@ class SecondFragment : Fragment() {
 
     private fun enterSafeZoneSetupMode() {
         if (!hasAssociatedDevice()) {
-            showSnackbar("Please associate a vehicle first", Snackbar.LENGTH_SHORT)
+            showSnackbar("Asocia un vehículo primero", Snackbar.LENGTH_SHORT)
             return
         }
 
@@ -692,8 +713,14 @@ class SecondFragment : Fragment() {
     }
 
     private fun establishSafeZoneForDevice(deviceId: Int) {
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            showSnackbar("Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
+            handleUnauthorizedError()
+            return
+        }
+
         binding.buttonZonaSegura.apply {
-            text = "Fetching vehicle location..."
+            text = "Obteniendo ubicación del vehículo..."
             isEnabled = false
         }
 
@@ -702,7 +729,10 @@ class SecondFragment : Fragment() {
                 val position = viewModel.getLastPosition(deviceId)
                 val geoPoint = GeoPoint(position.latitude, position.longitude)
 
-                // Guardar zona segura
+                // Enviar al servidor primero
+                viewModel.sendSafeZoneToServer(position.latitude, position.longitude, deviceId)
+
+                // Actualizar UI y caché solo si el servidor confirma
                 safeZone = geoPoint
                 safeZoneCache.set(geoPoint)
                 updateSafeZoneUI(geoPoint)
@@ -713,14 +743,17 @@ class SecondFragment : Fragment() {
                     putString(PREF_SAFEZONE_LON, position.longitude.toString())
                 }
 
-                // Enviar al servidor
-                viewModel.sendSafeZoneToServer(position.latitude, position.longitude, deviceId)
+                // Confirmar con el servidor
+                viewModel.fetchSafeZoneFromServer()
 
-                binding.buttonZonaSegura.isEnabled = true
-            } catch (e: Exception) {
-                showSnackbar("Failed to set safe zone: ${e.message}", Snackbar.LENGTH_LONG)
                 binding.buttonZonaSegura.apply {
-                    text = "Set Safe Zone"
+                    text = "Zona Segura Activa ✓"
+                    isEnabled = true
+                }
+            } catch (e: Exception) {
+                showSnackbar("Fallo al establecer zona segura: ${e.message}", Snackbar.LENGTH_LONG)
+                binding.buttonZonaSegura.apply {
+                    text = "Establecer Zona Segura"
                     isEnabled = true
                 }
             }
@@ -728,7 +761,17 @@ class SecondFragment : Fragment() {
     }
 
     private fun toggleSafeZone() {
-        // Limpiar UI inmediatamente
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            showSnackbar("Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
+            handleUnauthorizedError()
+            return
+        }
+
+        // Guardar estado actual para posible reversión
+        val previousSafeZone = safeZone
+        val previousPolygon = safeZonePolygon.get()
+
+        // Limpiar UI inmediatamente (optimista)
         safeZone = null
         safeZoneCache.clear()
         safeZonePolygon.get()?.let { map?.overlays?.remove(it) }
@@ -744,23 +787,39 @@ class SecondFragment : Fragment() {
 
         // Eliminar del servidor
         binding.buttonZonaSegura.apply {
-            text = "Deleting..."
+            text = "Eliminando..."
             isEnabled = false
         }
 
-        viewModel.deleteSafeZoneFromServer()
-
-        lifecycleScope.launch {
-            delay(1500)
-            if (isAdded) {
-                binding.buttonZonaSegura.apply {
-                    text = "Set Safe Zone"
-                    isEnabled = true
+        viewModel.deleteSafeZoneFromServer { success ->
+            lifecycleScope.launch {
+                if (success) {
+                    // Confirmar eliminación
+                    viewModel.fetchSafeZoneFromServer()
+                    binding.buttonZonaSegura.apply {
+                        text = "Establecer Zona Segura"
+                        isEnabled = true
+                    }
+                } else {
+                    // Revertir UI en caso de fallo
+                    safeZone = previousSafeZone
+                    if (previousSafeZone != null) {
+                        safeZoneCache.set(previousSafeZone)
+                        safeZonePolygon.set(previousPolygon)
+                        if (previousPolygon != null) {
+                            map?.overlays?.add(previousPolygon)
+                        }
+                        updateSafeZoneUI(previousSafeZone)
+                    }
+                    binding.buttonZonaSegura.apply {
+                        text = "Zona Segura Activa ✓"
+                        isEnabled = true
+                    }
+                    showSnackbar("Fallo al eliminar zona segura", Snackbar.LENGTH_LONG)
                 }
+                map?.postInvalidate()
             }
         }
-
-        map?.postInvalidate()
     }
 
     private fun loadSafeZone() {
@@ -786,14 +845,20 @@ class SecondFragment : Fragment() {
     // ============ DIALOGS OPTIMIZADOS ============
 
     private fun showAssociateDeviceDialog() {
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            showSnackbar("Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
+            handleUnauthorizedError()
+            return
+        }
+
         val dialogView = LayoutInflater.from(requireContext())
             .inflate(R.layout.dialog_associate_device, null)
 
         MaterialAlertDialogBuilder(requireContext())
-            .setTitle("Associate Vehicle")
-            .setMessage("Enter the GPS device Unique ID")
+            .setTitle("Asociar Vehículo")
+            .setMessage("Ingresa el ID único del dispositivo GPS")
             .setView(dialogView)
-            .setPositiveButton("Associate") { _, _ ->
+            .setPositiveButton("Asociar") { _, _ ->
                 val deviceUniqueId = dialogView.findViewById<EditText>(R.id.editDeviceId)
                     .text.toString().trim()
                 val deviceName = dialogView.findViewById<EditText>(R.id.editDeviceName)
@@ -802,28 +867,28 @@ class SecondFragment : Fragment() {
                 if (deviceUniqueId.isNotEmpty() && deviceName.isNotEmpty()) {
                     associateDevice(deviceUniqueId, deviceName)
                 } else {
-                    showSnackbar("Enter a valid Unique ID and name", Snackbar.LENGTH_SHORT)
+                    showSnackbar("Ingresa un ID único y nombre válidos", Snackbar.LENGTH_SHORT)
                 }
             }
-            .setNeutralButton("View Devices") { _, _ ->
+            .setNeutralButton("Ver Dispositivos") { _, _ ->
                 viewModel.showAvailableDevices { devices ->
                     MaterialAlertDialogBuilder(requireContext())
-                        .setTitle("Available Devices")
-                        .setMessage(devices)
+                        .setTitle("Dispositivos Disponibles")
+                        .setMessage(if (devices.isEmpty()) "No se encontraron dispositivos" else devices)
                         .setPositiveButton("OK", null)
                         .show()
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton("Cancelar", null)
             .show()
     }
 
-    private fun associateDevice(deviceUniqueId: String, name: String) {
-        Log.d(TAG, "Associating device: uniqueId=$deviceUniqueId, name=$name")
+    private fun associateDevice(deviceUniqueId: String, deviceName: String) {
+        Log.d(TAG, "Asociando dispositivo: uniqueId=$deviceUniqueId, name=$deviceName")
 
-        viewModel.associateDevice(deviceUniqueId, name) { deviceId, deviceName ->
+        viewModel.associateDevice(deviceUniqueId, deviceName) { deviceId, name ->
             // Actualizar UI inmediatamente
-            val info = "Device: $deviceName (ID: $deviceId)"
+            val info = "Dispositivo: $name (ID: $deviceId)"
             deviceInfoCache.set(info)
             updateDeviceInfoUI(info)
 
@@ -840,66 +905,72 @@ class SecondFragment : Fragment() {
 
     @RequiresApi(Build.VERSION_CODES.O)
     private fun showTraccarClientConfig() {
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            showSnackbar("Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
+            handleUnauthorizedError()
+            return
+        }
+
         val deviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
         val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
 
         if (deviceId == -1 || deviceUniqueId == null) {
-            showSnackbar("Associate a device first", Snackbar.LENGTH_SHORT)
+            showSnackbar("Asocia un dispositivo primero desde 'Asociar Vehículo'", Snackbar.LENGTH_LONG)
             return
         }
 
         viewModel.getGPSClientConfig { recommendedEndpoint, endpoints, instructions ->
             val configText = buildString {
-                appendLine("📱 GPS Client Configuration:")
+                appendLine("📱 Configuración del Cliente GPS:")
                 appendLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 appendLine()
-                appendLine("🔗 RECOMMENDED SERVER URL:")
+                appendLine("🔗 URL DEL SERVIDOR RECOMENDADA:")
                 appendLine("$recommendedEndpoint")
                 appendLine()
-                appendLine("📋 DEVICE SETTINGS:")
-                appendLine("Device ID: $deviceUniqueId")
-                appendLine("Protocol: ${instructions["protocol"] ?: "HTTP GET/POST"}")
-                appendLine("Parameters: ${instructions["parameters"] ?: "id, lat, lon, timestamp, speed"}")
-                appendLine("Frequency: 5 seconds")
-                appendLine("Distance: 10 meters")
+                appendLine("📋 CONFIGURACIÓN DEL DISPOSITIVO:")
+                appendLine("ID del Dispositivo: $deviceUniqueId")
+                appendLine("Protocolo: ${instructions["protocol"] ?: "HTTP GET/POST"}")
+                appendLine("Parámetros: ${instructions["parameters"] ?: "id, lat, lon, timestamp, speed"}")
+                appendLine("Frecuencia: 5 segundos")
+                appendLine("Distancia: 10 metros")
                 appendLine()
-                appendLine("🌐 ALTERNATIVE ENDPOINTS:")
+                appendLine("🌐 ENDPOINTS ALTERNATIVOS:")
                 endpoints.forEach { (name, url) ->
                     appendLine("• ${name.uppercase()}: $url")
                 }
                 appendLine()
-                appendLine("📱 FOR TRACCAR CLIENT APP:")
-                appendLine("1. Install Traccar Client from Play Store")
-                appendLine("2. Server URL: $recommendedEndpoint")
-                appendLine("3. Device ID: $deviceUniqueId")
-                appendLine("4. Enable location permissions")
-                appendLine("5. Start the service")
+                appendLine("📱 PARA LA APLICACIÓN TRACCAR CLIENT:")
+                appendLine("1. Instala Traccar Client desde Play Store")
+                appendLine("2. URL del Servidor: $recommendedEndpoint")
+                appendLine("3. ID del Dispositivo: $deviceUniqueId")
+                appendLine("4. Habilita permisos de ubicación")
+                appendLine("5. Inicia el servicio")
                 appendLine()
-                appendLine("🔧 FOR CUSTOM GPS DEVICE:")
-                appendLine("Send HTTP GET/POST requests to:")
+                appendLine("🔧 PARA DISPOSITIVOS GPS PERSONALIZADOS:")
+                appendLine("Envía solicitudes HTTP GET/POST a:")
                 appendLine("$recommendedEndpoint")
-                appendLine("Parameters: ${instructions["parameters"] ?: "id, lat, lon, timestamp, speed"}")
+                appendLine("Parámetros: ${instructions["parameters"] ?: "id, lat, lon, timestamp, speed"}")
                 appendLine()
-                appendLine("📡 EXAMPLE REQUEST:")
+                appendLine("📡 EJEMPLO DE SOLICITUD:")
                 appendLine(instructions["example"] ?: "GET $recommendedEndpoint?id=$deviceUniqueId&lat=-37.32167&lon=-59.13316&timestamp=${java.time.Instant.now()}&speed=0")
                 appendLine()
-                appendLine("✅ VERIFY CONNECTION:")
-                appendLine("Use 'Device Status' button to check if data is being received")
+                appendLine("✅ VERIFICA LA CONEXIÓN:")
+                appendLine("Usa el botón 'Estado del Dispositivo' para comprobar si se reciben datos")
             }
 
             MaterialAlertDialogBuilder(requireContext())
-                .setTitle("GPS Device Setup Guide")
+                .setTitle("Guía de Configuración de Dispositivo GPS")
                 .setMessage(configText)
-                .setPositiveButton("Copy Server URL") { _, _ ->
-                    copyToClipboard("Server URL", recommendedEndpoint)
-                    showSnackbar("✅ Server URL copied!", Snackbar.LENGTH_SHORT)
+                .setPositiveButton("Copiar URL del Servidor") { _, _ ->
+                    copyToClipboard("URL del Servidor", recommendedEndpoint)
+                    showSnackbar("✅ ¡URL del servidor copiada!", Snackbar.LENGTH_SHORT)
                 }
-                .setNeutralButton("Test URL") { _, _ ->
+                .setNeutralButton("Probar URL") { _, _ ->
                     val testUrl = instructions["example"] ?:
                     "$recommendedEndpoint?id=$deviceUniqueId&lat=-37.32167&lon=-59.13316&timestamp=${java.time.Instant.now()}&speed=0"
                     openInBrowser(testUrl)
                 }
-                .setNegativeButton("Close", null)
+                .setNegativeButton("Cerrar", null)
                 .show()
         }
     }
@@ -907,24 +978,24 @@ class SecondFragment : Fragment() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun showOfflineHelpDialog() {
         MaterialAlertDialogBuilder(requireContext())
-            .setTitle("🔴 Device Offline - Troubleshooting")
+            .setTitle("🔴 Dispositivo Fuera de Línea - Solución de Problemas")
             .setMessage(buildString {
-                appendLine("Your GPS device is not sending data. Here's how to fix it:")
+                appendLine("Tu dispositivo GPS no está enviando datos. Aquí tienes cómo solucionarlo:")
                 appendLine()
-                appendLine("✅ CHECK THESE ITEMS:")
-                appendLine("1. GPS device/app is running")
-                appendLine("2. Location permissions are enabled")
-                appendLine("3. Internet connection is working")
-                appendLine("4. Correct server URL is configured")
-                appendLine("5. Device ID matches exactly")
+                appendLine("✅ VERIFICA ESTOS PUNTOS:")
+                appendLine("1. El dispositivo GPS/aplicación está funcionando")
+                appendLine("2. Los permisos de ubicación están habilitados")
+                appendLine("3. La conexión a internet está activa")
+                appendLine("4. La URL del servidor está configurada correctamente")
+                appendLine("5. El ID del dispositivo coincide exactamente")
                 appendLine()
-                appendLine("🔧 NEXT STEPS:")
-                appendLine("• Use 'Show GPS Client Config' for setup")
-                appendLine("• Test the URL in your browser")
-                appendLine("• Check GPS app settings")
-                appendLine("• Restart the GPS tracking service")
+                appendLine("🔧 PRÓXIMOS PASOS:")
+                appendLine("• Usa 'Mostrar Configuración del Cliente GPS' para la configuración")
+                appendLine("• Prueba la URL en tu navegador")
+                appendLine("• Revisa la configuración de la aplicación GPS")
+                appendLine("• Reinicia el servicio de rastreo GPS")
             })
-            .setPositiveButton("Show Config") { _, _ ->
+            .setPositiveButton("Mostrar Configuración") { _, _ ->
                 showTraccarClientConfig()
             }
             .setNegativeButton("OK", null)
@@ -958,7 +1029,7 @@ class SecondFragment : Fragment() {
 
         map?.controller?.setZoom(16.0)
         map?.postInvalidate()
-        Log.d(TAG, "My location enabled")
+        Log.d(TAG, "Ubicación propia habilitada")
     }
 
     private fun hasLocationPermission(): Boolean {
@@ -1004,9 +1075,9 @@ class SecondFragment : Fragment() {
     private fun openInBrowser(url: String) {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            showSnackbar("🌐 Opening test URL in browser", Snackbar.LENGTH_SHORT)
+            showSnackbar("🌐 Abriendo URL de prueba en el navegador", Snackbar.LENGTH_SHORT)
         } catch (e: Exception) {
-            showSnackbar("❌ No browser available", Snackbar.LENGTH_SHORT)
+            showSnackbar("❌ No hay navegador disponible", Snackbar.LENGTH_SHORT)
         }
     }
 
@@ -1023,7 +1094,16 @@ class SecondFragment : Fragment() {
         }
 
         findNavController().navigate(R.id.action_SecondFragment_to_FirstFragment)
-        Log.d(TAG, "User logged out")
+        Log.d(TAG, "Usuario cerró sesión")
+    }
+
+    private fun handleUnauthorizedError() {
+        sharedPreferences.edit {
+            remove("jwt_token")
+            remove("user_email")
+        }
+        findNavController().navigate(R.id.action_SecondFragment_to_FirstFragment)
+        showSnackbar("Sesión expirada. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
     }
 
     // ============ LIFECYCLE OPTIMIZADO ============
@@ -1047,7 +1127,7 @@ class SecondFragment : Fragment() {
                 }
             }
         }
-        Log.d(TAG, "Fragment resumed")
+        Log.d(TAG, "Fragment reanudado")
     }
 
     override fun onPause() {
@@ -1060,11 +1140,11 @@ class SecondFragment : Fragment() {
         handler.removeCallbacksAndMessages(null)
 
         // Cerrar WebSocket limpiamente
-        webSocket?.close(1000, "Fragment paused")
+        webSocket?.close(1000, "Fragment pausado")
         webSocket = null
 
         map?.onPause()
-        Log.d(TAG, "Fragment paused")
+        Log.d(TAG, "Fragment pausado")
     }
 
     override fun onDestroyView() {
@@ -1077,7 +1157,7 @@ class SecondFragment : Fragment() {
         handler.removeCallbacksAndMessages(null)
 
         // Cerrar WebSocket
-        webSocket?.close(1000, "Fragment destroyed")
+        webSocket?.close(1000, "Fragment destruido")
         webSocket = null
 
         // Detener servicio
@@ -1101,6 +1181,6 @@ class SecondFragment : Fragment() {
         lastPositionCache.clear()
 
         _binding = null
-        Log.d(TAG, "Fragment view destroyed")
+        Log.d(TAG, "Vista del fragment destruida")
     }
 }

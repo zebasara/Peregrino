@@ -48,7 +48,6 @@ class TrackingService : Service() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
     private var wakeLock: PowerManager.WakeLock? = null
-    private lateinit var alertManager: AlertManager
 
     // ============ CONFIGURACIÓN Y ESTADO ============
     private var deviceId: Int = -1
@@ -90,16 +89,14 @@ class TrackingService : Service() {
         const val ALERT_NOTIFICATION_ID = 1002
         const val CHANNEL_ID = "tracking_channel"
         const val GEOFENCE_RADIUS = 15.0
-
-        // Configuración optimizada
-        const val LOCATION_INTERVAL = 5000L           // 5 segundos
-        const val FASTEST_INTERVAL = 2000L            // 2 segundos mínimo
-        const val DISPLACEMENT_THRESHOLD = 5f         // 5 metros mínimo
-        const val LOCATION_SEND_THROTTLE = 3000L     // Máximo 1 envío cada 3s
-        const val BATCH_SEND_INTERVAL = 10000L       // Enviar batch cada 10s
-        const val MAX_BATCH_SIZE = 20                // Máximo 20 ubicaciones por batch
-        const val MAX_CONSECUTIVE_ERRORS = 10        // Reintentos máximos
-        const val WAKE_LOCK_TIMEOUT = 60000L         // 1 minuto wake lock
+        const val LOCATION_INTERVAL = 5000L
+        const val FASTEST_INTERVAL = 2000L
+        const val DISPLACEMENT_THRESHOLD = 5f
+        const val LOCATION_SEND_THROTTLE = 3000L
+        const val BATCH_SEND_INTERVAL = 10000L
+        const val MAX_BATCH_SIZE = 20
+        const val MAX_CONSECUTIVE_ERRORS = 10
+        const val WAKE_LOCK_TIMEOUT = 60000L
     }
 
     data class LocationData(
@@ -118,39 +115,34 @@ class TrackingService : Service() {
         super.onCreate()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         sharedPreferences = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-        alertManager = AlertManager(this)
         createNotificationChannel()
         acquireWakeLock()
         startLocationProcessing()
-        Log.d(TAG, "TrackingService created")
+        Log.d(TAG, "TrackingService creado")
     }
 
     @RequiresApi(Build.VERSION_CODES.M)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Extraer parámetros
         deviceId = intent?.getIntExtra("deviceId", -1) ?: -1
         deviceUniqueId = sharedPreferences.getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
         jwtToken = intent?.getStringExtra("jwtToken") ?: SecondFragment.JWT_TOKEN
 
         Log.d(TAG, "onStartCommand: deviceId=$deviceId, uniqueId=$deviceUniqueId")
 
-        if (deviceId == -1 || deviceUniqueId.isNullOrEmpty()) {
-            Log.e(TAG, "Invalid device configuration, stopping service")
+        if (deviceId == -1 || deviceUniqueId.isNullOrEmpty() || jwtToken.isNullOrEmpty()) {
+            Log.e(TAG, "Configuración de dispositivo o token inválida, deteniendo servicio")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Iniciar foreground service
         startForeground(NOTIFICATION_ID, createNotification())
-
-        // Cargar zona segura y comenzar tracking
         loadSafeZone()
         startBatchProcessor()
 
         if (hasLocationPermission()) {
             startLocationUpdates()
         } else {
-            Log.e(TAG, "No location permission, stopping service")
+            Log.e(TAG, "Sin permiso de ubicación, deteniendo servicio")
             stopSelf()
         }
 
@@ -163,10 +155,10 @@ class TrackingService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Vehicle Tracking",
+                "Rastreo de Vehículo",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Real-time vehicle location tracking"
+                description = "Rastreo de ubicación de vehículo en tiempo real"
                 setShowBadge(false)
                 enableLights(false)
                 enableVibration(false)
@@ -177,7 +169,7 @@ class TrackingService : Service() {
         }
     }
 
-    private fun createNotification(contentText: String = "Monitoring vehicle location"): Notification {
+    private fun createNotification(contentText: String = "Monitoreando ubicación del vehículo"): Notification {
         val intent = packageManager.getLaunchIntentForPackage(packageName)
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
@@ -185,7 +177,7 @@ class TrackingService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Peregrino Tracking Active")
+            .setContentTitle("Rastreo Peregrino Activo")
             .setContentText(contentText)
             .setSmallIcon(com.zebass.peregrino.R.drawable.ic_vehicle)
             .setContentIntent(pendingIntent)
@@ -204,13 +196,12 @@ class TrackingService : Service() {
             fastestInterval = FASTEST_INTERVAL
             priority = LocationRequest.PRIORITY_HIGH_ACCURACY
             smallestDisplacement = DISPLACEMENT_THRESHOLD
-            maxWaitTime = LOCATION_INTERVAL * 2 // Batching for battery saving
+            maxWaitTime = LOCATION_INTERVAL * 2
         }
 
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(locationResult: LocationResult) {
                 locationResult.lastLocation?.let { location ->
-                    // Send to channel for async processing
                     serviceScope.launch {
                         locationProcessingChannel.send(location)
                     }
@@ -219,32 +210,38 @@ class TrackingService : Service() {
 
             override fun onLocationAvailability(availability: LocationAvailability) {
                 if (!availability.isLocationAvailable) {
-                    Log.w(TAG, "Location not available")
-                    updateNotification("Location unavailable - check GPS")
+                    Log.w(TAG, "Ubicación no disponible")
+                    updateNotification("Ubicación no disponible - verifica GPS")
                 }
             }
         }
 
         try {
-            val executor = Dispatchers.IO.asExecutor()
-            fusedLocationClient.requestLocationUpdates(
-                locationRequest,
-                executor,
-                locationCallback
-            )
-            Log.d(TAG, "Started location updates with optimized settings")
+            if (hasLocationPermission()) {
+                val executor = Dispatchers.IO.asExecutor()
+                fusedLocationClient.requestLocationUpdates(
+                    locationRequest,
+                    executor,
+                    locationCallback
+                )
+                Log.d(TAG, "Iniciadas actualizaciones de ubicación con configuración optimizada")
+            } else {
+                Log.e(TAG, "Permiso de ubicación denegado")
+                stopSelf()
+            }
         } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException in startLocationUpdates", e)
+            Log.e(TAG, "SecurityException en startLocationUpdates", e)
             stopSelf()
         }
     }
+
     // ============ LOCATION PROCESSING PIPELINE ============
 
     @RequiresApi(Build.VERSION_CODES.M)
     private fun startLocationProcessing() {
         serviceScope.launch {
             locationProcessingChannel.consumeAsFlow()
-                .buffer(Channel.UNLIMITED) // Buffer ilimitado para no perder ubicaciones
+                .buffer(Channel.UNLIMITED)
                 .collect { location ->
                     processLocation(location)
                 }
@@ -254,22 +251,18 @@ class TrackingService : Service() {
     @RequiresApi(Build.VERSION_CODES.M)
     private suspend fun processLocation(location: Location) = withContext(Dispatchers.Default) {
         try {
-            // 1. Validar ubicación
             if (!isValidLocation(location)) {
-                Log.d(TAG, "Invalid location, skipping")
+                Log.d(TAG, "Ubicación inválida, omitiendo")
                 return@withContext
             }
 
-            // 2. Throttling inteligente
             if (!shouldSendLocation(location)) {
-                Log.d(TAG, "Location throttled")
+                Log.d(TAG, "Ubicación restringida por throttling")
                 return@withContext
             }
 
-            // 3. Verificar zona segura
             checkSafeZone(location)
 
-            // 4. Preparar datos
             val locationData = LocationData(
                 latitude = location.latitude,
                 longitude = location.longitude,
@@ -279,21 +272,18 @@ class TrackingService : Service() {
                 bearing = location.bearing
             )
 
-            // 5. Añadir a batch
             addToBatch(locationData)
 
-            // 6. Enviar inmediatamente si es significativo
             if (isSignificantLocationChange(location)) {
                 sendBatchNow()
             }
 
-            // Actualizar estado
             lastLocationSent.set(location)
             lastLocationTime.set(System.currentTimeMillis())
-            updateNotification("Active - Last update: ${getCurrentTime()}")
+            updateNotification("Activo - Última actualización: ${getCurrentTime()}")
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing location", e)
+            Log.e(TAG, "Error procesando ubicación", e)
             handleLocationError()
         }
     }
@@ -314,8 +304,6 @@ class TrackingService : Service() {
     private fun addToBatch(locationData: LocationData) {
         synchronized(batchLock) {
             locationBatch.add(locationData)
-
-            // Si el batch está lleno, enviarlo inmediatamente
             if (locationBatch.size >= MAX_BATCH_SIZE) {
                 serviceScope.launch { sendBatchNow() }
             }
@@ -326,18 +314,15 @@ class TrackingService : Service() {
     private suspend fun sendBatchNow() = withContext(Dispatchers.IO) {
         val dataToSend = synchronized(batchLock) {
             if (locationBatch.isEmpty()) return@withContext
-
             val data = locationBatch.toList()
             locationBatch.clear()
             data
         }
 
-        // Enviar solo la ubicación más reciente para tiempo real
         dataToSend.lastOrNull()?.let { mostRecent ->
             sendLocationToServer(mostRecent)
         }
 
-        // Si hay múltiples ubicaciones, enviar batch completo
         if (dataToSend.size > 1) {
             sendBatchToServer(dataToSend)
         }
@@ -347,7 +332,11 @@ class TrackingService : Service() {
 
     @RequiresApi(Build.VERSION_CODES.M)
     private suspend fun sendLocationToServer(locationData: LocationData) = withContext(Dispatchers.IO) {
-        if (deviceUniqueId == null) return@withContext
+        if (deviceUniqueId == null || jwtToken.isNullOrEmpty()) {
+            Log.e(TAG, "deviceUniqueId o jwtToken nulo, omitiendo envío")
+            handleLocationError()
+            return@withContext
+        }
 
         try {
             val url = "https://carefully-arriving-shepherd.ngrok-free.app/gps/osmand?" +
@@ -369,19 +358,21 @@ class TrackingService : Service() {
 
             if (response.isSuccessful) {
                 consecutiveErrors.set(0)
-                Log.d(TAG, "Location sent successfully")
+                Log.d(TAG, "Ubicación enviada exitosamente")
             } else {
-                throw Exception("Server returned ${response.code}")
+                throw Exception("Servidor retornó ${response.code}")
             }
-
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send location", e)
+            Log.e(TAG, "Fallo al enviar ubicación: ${e.message}", e)
             handleLocationError()
         }
     }
 
     private suspend fun sendBatchToServer(batch: List<LocationData>) = withContext(Dispatchers.IO) {
-        if (deviceUniqueId == null || batch.isEmpty()) return@withContext
+        if (deviceUniqueId == null || batch.isEmpty() || jwtToken.isNullOrEmpty()) {
+            Log.e(TAG, "deviceUniqueId, jwtToken nulo o batch vacío, omitiendo envío")
+            return@withContext
+        }
 
         try {
             val jsonArray = org.json.JSONArray()
@@ -406,11 +397,14 @@ class TrackingService : Service() {
                 .tag("batch_update")
                 .build()
 
-            httpClient.newCall(request).execute()
-            Log.d(TAG, "Batch of ${batch.size} locations sent")
-
+            val response = httpClient.newCall(request).execute()
+            if (response.isSuccessful) {
+                Log.d(TAG, "Batch de ${batch.size} ubicaciones enviado")
+            } else {
+                Log.e(TAG, "Fallo al enviar batch: ${response.code}")
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send batch", e)
+            Log.e(TAG, "Fallo al enviar batch", e)
         }
     }
 
@@ -422,7 +416,10 @@ class TrackingService : Service() {
 
         if (lat != null && lon != null) {
             safeZone.set(LatLng(lat, lon))
-            Log.d(TAG, "Loaded safe zone: lat=$lat, lon=$lon")
+            Log.d(TAG, "Zona segura cargada: lat=$lat, lon=$lon")
+        } else {
+            safeZone.set(null)
+            Log.d(TAG, "No se encontró zona segura en preferencias")
         }
     }
 
@@ -443,16 +440,14 @@ class TrackingService : Service() {
 
     @RequiresApi(Build.VERSION_CODES.O)
     private fun triggerGeofenceAlert(distance: Double) {
-        // Vibración
         val vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
         vibrator.vibrate(
             VibrationEffect.createOneShot(1000, VibrationEffect.DEFAULT_AMPLITUDE)
         )
 
-        // Notificación
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("⚠️ Geofence Alert")
-            .setContentText("Vehicle is ${"%.1f".format(distance)} meters outside safe zone")
+            .setContentTitle("⚠️ Alerta de Geocerca")
+            .setContentText("El vehículo está a ${"%.1f".format(distance)} metros fuera de la zona segura")
             .setSmallIcon(com.zebass.peregrino.R.drawable.ic_vehicle_alert)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
@@ -462,7 +457,7 @@ class TrackingService : Service() {
         getSystemService(NotificationManager::class.java)
             ?.notify(ALERT_NOTIFICATION_ID, notification)
 
-        Log.d(TAG, "Geofence alert triggered: distance=$distance")
+        Log.d(TAG, "Alerta de geocerca disparada: distancia=$distance")
     }
 
     // ============ UTILITY FUNCTIONS ============
@@ -470,38 +465,28 @@ class TrackingService : Service() {
     private fun isValidLocation(location: Location): Boolean {
         return location.latitude != 0.0 &&
                 location.longitude != 0.0 &&
-                location.accuracy < 100f // Ignorar ubicaciones muy imprecisas
+                location.accuracy < 100f
     }
 
     private fun shouldSendLocation(location: Location): Boolean {
         val now = System.currentTimeMillis()
         val timeSinceLastSend = now - lastLocationTime.get()
 
-        // Throttling básico
         if (timeSinceLastSend < LOCATION_SEND_THROTTLE) {
             return false
         }
 
-        // Si es la primera ubicación
         val lastLocation = lastLocationSent.get() ?: return true
-
-        // Calcular distancia desde última ubicación enviada
         val distance = lastLocation.distanceTo(location)
-
-        // Enviar si se movió más del threshold o pasó mucho tiempo
         return distance >= DISPLACEMENT_THRESHOLD || timeSinceLastSend > LOCATION_INTERVAL * 3
     }
 
     private fun isSignificantLocationChange(location: Location): Boolean {
         val lastLocation = lastLocationSent.get() ?: return true
-
         val distance = lastLocation.distanceTo(location)
         val speedChange = abs(location.speed - lastLocation.speed)
         val bearingChange = abs(location.bearing - lastLocation.bearing)
-
-        return distance > 50f || // Movimiento significativo
-                speedChange > 5f || // Cambio de velocidad significativo
-                bearingChange > 45f  // Cambio de dirección significativo
+        return distance > 50f || speedChange > 5f || bearingChange > 45f
     }
 
     private fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -532,10 +517,9 @@ class TrackingService : Service() {
     @RequiresApi(Build.VERSION_CODES.M)
     private fun handleLocationError() {
         val errors = consecutiveErrors.incrementAndGet()
-
         if (errors >= MAX_CONSECUTIVE_ERRORS) {
-            Log.e(TAG, "Too many consecutive errors, stopping service")
-            updateNotification("Service stopped - too many errors")
+            Log.e(TAG, "Demasiados errores consecutivos, deteniendo servicio")
+            updateNotification("Servicio detenido - demasiados errores")
             stopSelf()
         }
     }
@@ -567,31 +551,26 @@ class TrackingService : Service() {
 
     @RequiresApi(Build.VERSION_CODES.M)
     override fun onDestroy() {
-        Log.d(TAG, "TrackingService destroying")
+        Log.d(TAG, "Destruyendo TrackingService")
 
-        // Cancelar todas las operaciones
         batchJob?.cancel()
         serviceScope.cancel()
 
-        // Enviar último batch si existe
         runBlocking {
             withTimeoutOrNull(2000L) {
                 sendBatchNow()
             }
         }
 
-        // Limpiar recursos
         if (::locationCallback.isInitialized) {
             fusedLocationClient.removeLocationUpdates(locationCallback)
         }
 
         releaseWakeLock()
         locationProcessingChannel.close()
-
-        // Cancelar requests HTTP pendientes
         httpClient.dispatcher.cancelAll()
 
         super.onDestroy()
-        Log.d(TAG, "TrackingService destroyed")
+        Log.d(TAG, "TrackingService destruido")
     }
 }
