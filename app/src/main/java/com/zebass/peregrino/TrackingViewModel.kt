@@ -50,9 +50,6 @@ class TrackingViewModel : ViewModel() {
     private val _deviceInfo = MutableStateFlow<String?>(null)
     val deviceInfo: StateFlow<String?> = _deviceInfo.asStateFlow()
 
-    private val _deviceStatus = MutableStateFlow<DeviceStatus?>(null)
-    val deviceStatus: StateFlow<DeviceStatus?> = _deviceStatus.asStateFlow()
-
     // ============ HTTP CLIENT ULTRA-OPTIMIZADO ============
     private val client by lazy {
         OkHttpClient.Builder().apply {
@@ -86,9 +83,9 @@ class TrackingViewModel : ViewModel() {
         fun isValid(): Boolean = System.currentTimeMillis() - timestamp < ttl
     }
 
-    private val positionCache = ConcurrentHashMap<Int, CacheEntry<LatLng>>()
-    private val deviceStatusCache = ConcurrentHashMap<Int, CacheEntry<DeviceStatus>>()
-    private val safeZoneCache = ConcurrentHashMap<Int, CacheEntry<LatLng>>()
+    private val positionCache = ConcurrentHashMap<String, CacheEntry<LatLng>>()
+    private val deviceStatusCache = ConcurrentHashMap<String, CacheEntry<DeviceStatus>>()
+    private val safeZoneCache = ConcurrentHashMap<String, CacheEntry<LatLng>>()
     private val deviceListCache = AtomicReference<CacheEntry<List<DeviceInfo>>?>()
 
     // ============ COROUTINES OPTIMIZADAS ============
@@ -110,16 +107,17 @@ class TrackingViewModel : ViewModel() {
     )
 
     data class DeviceInfo(
-        val id: Int,
+        val id: String,        // Cambiado a String para uniqueId
         val name: String,
         val uniqueId: String,
         val status: String = "unknown"
     )
 
-    data class GPSConfig(
-        val recommendedEndpoint: String,
-        val endpoints: Map<String, String>,
-        val instructions: Map<String, String>
+    data class DeviceInfoResponse(
+        val id: String, // Cambiado de Int a String
+        val name: String,
+        val uniqueId: String?,
+        val status: String?
     )
 
     companion object {
@@ -142,22 +140,33 @@ class TrackingViewModel : ViewModel() {
         this.context = context.applicationContext
     }
 
-    fun updateVehiclePosition(deviceId: Int, position: GeoPoint) {
+    fun updateVehiclePosition(deviceUniqueId: String, position: GeoPoint) {
         val latLng = LatLng(position.latitude, position.longitude)
-        positionCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
-        _vehiclePosition.value = Pair(deviceId, latLng)
-        Log.d(TAG, "Position updated: deviceId=$deviceId, lat=${position.latitude}, lon=${position.longitude}")
+
+        // Cache usando uniqueId
+        positionCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
+
+        // Convertir uniqueId a int para compatibilidad con el StateFlow existente
+        val deviceIdInt = deviceUniqueId.hashCode() // Usar hashCode para consistencia
+        _vehiclePosition.value = Pair(deviceIdInt, latLng)
+
+        Log.d(TAG, "✅ Position updated in ViewModel: deviceUniqueId=$deviceUniqueId, deviceIdInt=$deviceIdInt, lat=${position.latitude}, lon=${position.longitude}")
     }
 
+
     fun fetchSafeZoneFromServer() {
-        val deviceId = getDeviceId()
-        if (deviceId == -1) {
-            Log.d(TAG, "No device ID, skipping fetchSafeZoneFromServer")
+        // Obtener uniqueId de las preferencias
+        val deviceUniqueId = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
+
+        if (deviceUniqueId == null) {
+            Log.d(TAG, "No device uniqueId, skipping fetchSafeZoneFromServer")
             postError("No se encontró dispositivo asociado")
             return
         }
 
-        safeZoneCache[deviceId]?.let { cached ->
+        // Check cache usando uniqueId
+        safeZoneCache[deviceUniqueId]?.let { cached ->
             if (cached.isValid()) {
                 _safeZone.value = cached.data
                 Log.d(TAG, "Safe zone from cache: ${cached.data}")
@@ -170,22 +179,24 @@ class TrackingViewModel : ViewModel() {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
                     throw Exception("Token de autenticación inválido")
                 }
+
                 val safeZone = executeRequest<SafeZoneResponse> {
                     Request.Builder()
-                        .url("$BASE_URL/api/safezone?deviceId=$deviceId")
+                        .url("$BASE_URL/api/safezone?deviceId=$deviceUniqueId")
                         .get()
                         .addAuthHeader()
                         .build()
                 }
+
                 if (safeZone != null) {
                     val latLng = LatLng(safeZone.latitude, safeZone.longitude)
-                    safeZoneCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
+                    safeZoneCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
                     _safeZone.value = latLng
                     Log.d(TAG, "Fetched safe zone: lat=${safeZone.latitude}, lon=${safeZone.longitude}")
                 } else {
                     _safeZone.value = null
-                    safeZoneCache.remove(deviceId)
-                    Log.d(TAG, "No safe zone found for deviceId=$deviceId")
+                    safeZoneCache.remove(deviceUniqueId)
+                    Log.d(TAG, "No safe zone found for deviceUniqueId=$deviceUniqueId")
                 }
             } catch (e: Exception) {
                 val errorMsg = when {
@@ -198,8 +209,11 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-    fun checkDeviceStatus(deviceId: Int, callback: (Boolean, String) -> Unit) {
-        deviceStatusCache[deviceId]?.let { cached ->
+    fun checkDeviceStatus(deviceUniqueId: String, callback: (Boolean, String) -> Unit) {
+        Log.d(TAG, "🔍 Checking device status for uniqueId: $deviceUniqueId")
+
+        // Cache usando uniqueId
+        deviceStatusCache[deviceUniqueId]?.let { cached ->
             if (cached.isValid()) {
                 val status = cached.data
                 val message = if (status.isOnline) {
@@ -207,6 +221,7 @@ class TrackingViewModel : ViewModel() {
                 } else {
                     "⚠️ ${status.deviceName} está fuera de línea - sin posiciones recientes"
                 }
+                Log.d(TAG, "📊 Status from cache: $message")
                 callback(status.isOnline, message)
                 return
             }
@@ -217,9 +232,12 @@ class TrackingViewModel : ViewModel() {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
                     throw Exception("Token de autenticación inválido")
                 }
+
+                Log.d(TAG, "🌐 Fetching device status from server for uniqueId: $deviceUniqueId")
+
                 val statusResponse = executeRequest<DeviceStatusResponse> {
                     Request.Builder()
-                        .url("$BASE_URL/api/device/status/$deviceId")
+                        .url("$BASE_URL/api/device/status/$deviceUniqueId")
                         .get()
                         .addAuthHeader()
                         .build()
@@ -231,25 +249,27 @@ class TrackingViewModel : ViewModel() {
                     recentPositions = statusResponse.recentPositions
                 )
 
-                deviceStatusCache[deviceId] = CacheEntry(status, System.currentTimeMillis(), DEVICE_STATUS_TTL)
-                _deviceStatus.value = status
+                // Cache usando uniqueId
+                deviceStatusCache[deviceUniqueId] = CacheEntry(status, System.currentTimeMillis(), DEVICE_STATUS_TTL)
 
                 val message = if (status.isOnline) {
-                    "✅ ${status.deviceName} está en línea - ${status.recentPositions} posiciones recientes"
+                    "${status.deviceName} está en línea - ${status.recentPositions} posiciones recientes"
                 } else {
-                    "⚠️ ${status.deviceName} está fuera de línea - sin posiciones recientes"
+                    "${status.deviceName} está fuera de línea - sin posiciones recientes"
                 }
+
+                Log.d(TAG, "✅ Device status fetched: isOnline=${status.isOnline}, recentPositions=${status.recentPositions}")
 
                 withContext(Dispatchers.Main) {
                     callback(status.isOnline, message)
                 }
-                Log.d(TAG, "Device status: $message")
             } catch (e: Exception) {
                 val errorMsg = when {
                     e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
                     e.message?.contains("404") == true -> "Dispositivo no encontrado."
                     else -> "Error al verificar estado del dispositivo: ${e.localizedMessage}"
                 }
+                Log.e(TAG, "❌ Error checking device status: $errorMsg", e)
                 withContext(Dispatchers.Main) {
                     callback(false, errorMsg)
                 }
@@ -257,6 +277,8 @@ class TrackingViewModel : ViewModel() {
             }
         }
     }
+
+
 
     @RequiresApi(Build.VERSION_CODES.O)
     fun getGPSClientConfig(callback: (String, Map<String, String>, Map<String, String>) -> Unit) {
@@ -322,16 +344,17 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-    fun sendSafeZoneToServer(latitude: Double, longitude: Double, deviceId: Int) {
+    fun sendSafeZoneToServer(latitude: Double, longitude: Double, deviceUniqueId: String) {
         networkScope.launch {
             try {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
                     throw Exception("Token de autenticación inválido")
                 }
+
                 val requestBody = FormBody.Builder()
                     .add("latitude", latitude.toString())
                     .add("longitude", longitude.toString())
-                    .add("deviceId", deviceId.toString())
+                    .add("deviceId", deviceUniqueId) // Enviar uniqueId
                     .build()
 
                 executeRequest<Unit> {
@@ -343,10 +366,11 @@ class TrackingViewModel : ViewModel() {
                 }
 
                 val latLng = LatLng(latitude, longitude)
-                safeZoneCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
+                // Cache usando uniqueId
+                safeZoneCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
                 _safeZone.value = latLng
 
-                Log.d(TAG, "Zona segura enviada: lat=$latitude, lon=$longitude, deviceId=$deviceId")
+                Log.d(TAG, "Zona segura enviada: lat=$latitude, lon=$longitude, deviceUniqueId=$deviceUniqueId")
             } catch (e: Exception) {
                 val errorMsg = when {
                     e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
@@ -360,9 +384,11 @@ class TrackingViewModel : ViewModel() {
     }
 
     fun deleteSafeZoneFromServer(callback: (Boolean) -> Unit = {}) {
-        val deviceId = getDeviceId()
-        if (deviceId == -1) {
-            Log.d(TAG, "No device ID, skipping deleteSafeZoneFromServer")
+        val deviceUniqueId = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
+
+        if (deviceUniqueId == null) {
+            Log.d(TAG, "No device uniqueId, skipping deleteSafeZoneFromServer")
             postError("No se encontró dispositivo asociado")
             callback(false)
             return
@@ -373,33 +399,67 @@ class TrackingViewModel : ViewModel() {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
                     throw Exception("Token de autenticación inválido")
                 }
+
+                Log.d(TAG, "🗑️ Attempting to delete safe zone for uniqueId: $deviceUniqueId")
+
+                // Use DELETE with JSON body for better server compatibility
+                val requestBody = JSONObject().apply {
+                    put("deviceId", deviceUniqueId)
+                }.toString().toRequestBody("application/json".toMediaType())
+
                 executeRequest<Unit> {
                     Request.Builder()
-                        .url("$BASE_URL/api/safezone?deviceId=$deviceId")
-                        .delete()
+                        .url("$BASE_URL/api/safezone")
+                        .delete(requestBody)
                         .addAuthHeader()
                         .build()
                 }
 
-                safeZoneCache.remove(deviceId)
+                // Si llegamos aquí, la eliminación fue exitosa
+                Log.d(TAG, "✅ Safe zone deleted successfully from server")
+
+                safeZoneCache.remove(deviceUniqueId)
                 _safeZone.value = null
+
                 withContext(Dispatchers.Main) {
                     callback(true)
                 }
-                Log.d(TAG, "Zona segura eliminada para deviceId=$deviceId")
+
             } catch (e: Exception) {
-                val errorMsg = when {
-                    e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
-                    e.message?.contains("404") == true -> "No se encontró zona segura para este dispositivo."
-                    else -> "Fallo al eliminar zona segura: ${e.localizedMessage}"
-                }
-                handleError(errorMsg, e)
-                withContext(Dispatchers.Main) {
-                    callback(false)
+                Log.e(TAG, "❌ Error deleting safe zone: ${e.message}")
+
+                // CRÍTICO: Tratar 404 como éxito (zona ya no existe = eliminación exitosa)
+                val is404NotFound = e.message?.contains("404") == true
+                val isAlreadyDeleted = e.message?.contains("No se encontró zona segura") == true
+
+                if (is404NotFound || isAlreadyDeleted) {
+                    Log.d(TAG, "✅ Safe zone already deleted (404) - treating as success")
+
+                    // Limpiar cache y estado
+                    safeZoneCache.remove(deviceUniqueId)
+                    _safeZone.value = null
+
+                    withContext(Dispatchers.Main) {
+                        callback(true) // ÉXITO porque ya no existe
+                    }
+                } else {
+                    // Solo otros errores son fallos reales
+                    val errorMsg = when {
+                        e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
+                        else -> "Fallo al eliminar zona segura: ${e.localizedMessage}"
+                    }
+
+                    Log.e(TAG, "❌ Real error deleting safe zone: $errorMsg")
+                    handleError(errorMsg, e)
+
+                    withContext(Dispatchers.Main) {
+                        callback(false)
+                    }
                 }
             }
         }
     }
+
 
     fun associateDevice(deviceUniqueId: String, name: String, callback: (Int, String) -> Unit) {
         if (deviceUniqueId.isBlank() || name.isBlank()) {
@@ -407,11 +467,14 @@ class TrackingViewModel : ViewModel() {
             return
         }
 
+        Log.d(TAG, "Associating device: uniqueId=$deviceUniqueId, name=$name")
+
         networkScope.launch {
             try {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
                     throw Exception("Token de autenticación inválido")
                 }
+
                 val json = JSONObject().apply {
                     put("deviceId", deviceUniqueId.trim())
                     put("name", name.trim())
@@ -427,26 +490,33 @@ class TrackingViewModel : ViewModel() {
                         .build()
                 } ?: throw Exception("No se recibió respuesta del servidor")
 
+                Log.d(TAG, "Device associated successfully: id=${response.id}, name=${response.name}")
+
+                // Save to preferences immediately
                 context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit {
                     putInt(DEVICE_ID_PREF, response.id)
                     putString(DEVICE_NAME_PREF, response.name)
                     putString(DEVICE_UNIQUE_ID_PREF, response.uniqueId)
                 }
 
-                clearCachesForDevice(response.id)
+                // Clear all caches
+                clearAllCaches()
 
                 withContext(Dispatchers.Main) {
                     callback(response.id, response.name)
                 }
 
-                Log.d(TAG, "Dispositivo asociado: id=${response.id}, name=${response.name}")
+                Log.d(TAG, "Device association completed successfully")
+
             } catch (e: Exception) {
                 val errorMsg = when {
                     e.message?.contains("404") == true -> "Dispositivo no encontrado. Verifica el ID único en Traccar."
                     e.message?.contains("409") == true -> "El dispositivo ya está asociado."
                     e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
+                    e.message?.contains("400") == true -> "Datos de dispositivo inválidos. Verifica el ID único y nombre."
                     else -> "Error al asociar dispositivo: ${e.localizedMessage}"
                 }
+                Log.e(TAG, "Error associating device: $errorMsg", e)
                 handleError(errorMsg, e)
             }
         }
@@ -498,7 +568,7 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-    fun showDeviceSelectionForSafeZone(callback: (Int) -> Unit) {
+    fun showDeviceSelectionForSafeZone(callback: (String) -> Unit) {
         networkScope.launch {
             try {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
@@ -517,7 +587,7 @@ class TrackingViewModel : ViewModel() {
                 }
 
                 val deviceNames = uniqueDevices.map { "${it.name} (ID: ${it.id})" }.toTypedArray()
-                val deviceIds = uniqueDevices.map { it.id }.toIntArray()
+                val deviceIds = uniqueDevices.map { it.id }.toList() // Cambiado a List<String>
 
                 withContext(Dispatchers.Main) {
                     Log.d(TAG, "Showing device selection with ${deviceIds.size} devices")
@@ -541,10 +611,13 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-    suspend fun getLastPosition(deviceId: Int): LatLng {
-        positionCache[deviceId]?.let { cached ->
+    suspend fun getLastPosition(deviceUniqueId: String): LatLng {
+        Log.d(TAG, "📍 Getting last position for uniqueId: $deviceUniqueId")
+
+        // Check cache usando uniqueId
+        positionCache[deviceUniqueId]?.let { cached ->
             if (cached.isValid()) {
-                Log.d(TAG, "Position from cache for deviceId=$deviceId")
+                Log.d(TAG, "✅ Position from cache for uniqueId: $deviceUniqueId")
                 return cached.data
             }
         }
@@ -554,45 +627,107 @@ class TrackingViewModel : ViewModel() {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
                     throw Exception("Token de autenticación inválido")
                 }
+
+                Log.d(TAG, "🌐 Fetching position from server for uniqueId: $deviceUniqueId")
+
                 val position = executeRequest<LastPositionResponse> {
                     Request.Builder()
-                        .url("$BASE_URL/api/last-position?deviceId=$deviceId")
+                        .url("$BASE_URL/api/last-position?deviceId=$deviceUniqueId")
                         .get()
                         .addAuthHeader()
                         .build()
                 } ?: throw Exception("No se recibió datos de posición")
+
                 val latLng = LatLng(position.latitude, position.longitude)
-                positionCache[deviceId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
-                Log.d(TAG, "Fetched last position: deviceId=$deviceId, lat=${position.latitude}, lon=${position.longitude}")
+
+                // Cache usando uniqueId
+                positionCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
+
+                Log.d(TAG, "✅ Position fetched from server: uniqueId=$deviceUniqueId, lat=${position.latitude}, lon=${position.longitude}")
                 latLng
             }
         }
     }
+    private fun getDeviceUniqueId(): String? {
+        return context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
+    }
+    fun forceDataRefresh() {
+        Log.d(TAG, "🔄 Forcing data refresh...")
 
+        // Clear all caches
+        clearAllCaches()
+
+        // Re-fetch associated devices
+        fetchAssociatedDevices()
+
+        // Try to get current position
+        getDeviceUniqueId()?.let { uniqueId ->
+            networkScope.launch {
+                try {
+                    val position = getLastPosition(uniqueId)
+                    val geoPoint = GeoPoint(position.latitude, position.longitude)
+                    updateVehiclePosition(uniqueId, geoPoint)
+                    Log.d(TAG, "✅ Force refresh completed with position update")
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Force refresh failed: ${e.message}")
+                }
+            }
+        }
+    }
     fun fetchAssociatedDevices() {
+        Log.d(TAG, "🔄 Fetching associated devices...")
+
         networkScope.launch {
             try {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
                     throw Exception("Token de autenticación inválido")
                 }
+
+                // Clear cache before fetching
+                deviceListCache.set(null)
+
                 val devices = getUserDevices()
+                Log.d(TAG, "📱 Fetched ${devices.size} devices from server")
+
                 if (devices.isNotEmpty()) {
                     val firstDevice = devices.first()
-                    _deviceInfo.value = "Vehículo: ${firstDevice.name} (ID: ${firstDevice.id})"
+                    val info = "Vehículo: ${firstDevice.name} (UniqueID: ${firstDevice.uniqueId})"
+                    _deviceInfo.value = info
+
+                    // Save to preferences usando String para deviceId
                     context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit {
-                        putInt(DEVICE_ID_PREF, firstDevice.id)
+                        // Guardar también el ID interno como int para compatibilidad
+                        putInt(DEVICE_ID_PREF, firstDevice.uniqueId.hashCode())
                         putString(DEVICE_NAME_PREF, firstDevice.name)
+                        putString(DEVICE_UNIQUE_ID_PREF, firstDevice.uniqueId)
                     }
-                    Log.d(TAG, "Fetched associated device: id=${firstDevice.id}, name=${firstDevice.name}")
+
+                    Log.d(TAG, "✅ Device info saved: uniqueId=${firstDevice.uniqueId}, name=${firstDevice.name}")
+
+                    // Forzar actualización de status inmediatamente
+                    checkDeviceStatus(firstDevice.uniqueId) { isOnline, message ->
+                        Log.d(TAG, "📊 Initial device status: $message")
+                    }
+
                 } else {
                     _deviceInfo.value = "No hay vehículos asociados"
-                    Log.d(TAG, "No associated devices found")
+                    Log.d(TAG, "⚠️ No associated devices found")
+
+                    // Clear preferences if no devices
+                    context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit {
+                        remove(DEVICE_ID_PREF)
+                        remove(DEVICE_NAME_PREF)
+                        remove(DEVICE_UNIQUE_ID_PREF)
+                    }
                 }
             } catch (e: Exception) {
                 val errorMsg = when {
                     e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
+                    e.message?.contains("404") == true -> "No hay dispositivos asociados a tu cuenta."
                     else -> "Error al obtener dispositivos asociados: ${e.localizedMessage}"
                 }
+                Log.e(TAG, "❌ Error fetching associated devices: $errorMsg", e)
                 handleError(errorMsg, e)
             }
         }
@@ -603,31 +738,62 @@ class TrackingViewModel : ViewModel() {
     private suspend fun getUserDevices(): List<DeviceInfo> {
         deviceListCache.get()?.let { cached ->
             if (cached.isValid()) {
+                Log.d(TAG, "Using cached devices: ${cached.data.size}")
                 return cached.data
             }
         }
 
-        val response = executeRequest<List<DeviceInfoResponse>> {
-            Request.Builder()
-                .url("$BASE_URL/api/user/devices")
-                .get()
-                .addAuthHeader()
-                .build()
-        } ?: emptyList()
+        Log.d(TAG, "Fetching devices from server...")
 
-        val devices = response.mapNotNull { deviceResponse ->
-            if (deviceResponse.id > 0) {
-                DeviceInfo(
-                    id = deviceResponse.id,
-                    name = deviceResponse.name,
-                    uniqueId = deviceResponse.uniqueId ?: "N/A",
-                    status = deviceResponse.status ?: "unknown"
-                )
-            } else null
+        try {
+            val response = executeRequest<List<DeviceInfoResponse>> {
+                Request.Builder()
+                    .url("$BASE_URL/api/user/devices?forceRefresh=true")
+                    .get()
+                    .addAuthHeader()
+                    .build()
+            }
+
+            Log.d(TAG, "Raw API response received: ${response?.size ?: 0} devices")
+
+            val devices = response?.mapNotNull { deviceResponse ->
+                if (deviceResponse.id.isNotEmpty()) { // Validar que id no esté vacío
+                    Log.d(TAG, "Processing device: id=${deviceResponse.id}, name=${deviceResponse.name}")
+                    DeviceInfo(
+                        id = deviceResponse.id, // id es String
+                        name = deviceResponse.name,
+                        uniqueId = deviceResponse.uniqueId ?: "N/A",
+                        status = deviceResponse.status ?: "unknown"
+                    )
+                } else {
+                    Log.w(TAG, "Skipping invalid device with id=${deviceResponse.id}")
+                    null
+                }
+            } ?: emptyList()
+
+            Log.d(TAG, "Processed ${devices.size} valid devices")
+            deviceListCache.set(CacheEntry(devices, System.currentTimeMillis(), DEVICE_LIST_TTL))
+            return devices
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching user devices: ${e.message}", e)
+            if (e.message?.contains("404") == true) {
+                // Return empty list for 404, don't cache
+                return emptyList()
+            }
+            throw e
         }
+    }
 
-        deviceListCache.set(CacheEntry(devices, System.currentTimeMillis(), DEVICE_LIST_TTL))
-        return devices
+    private fun clearAllCaches() {
+        Log.d(TAG, "Clearing all caches...")
+
+        positionCache.clear()
+        deviceStatusCache.clear()
+        safeZoneCache.clear()
+        deviceListCache.set(null)
+
+        Log.d(TAG, "All caches cleared")
     }
 
     private suspend inline fun <reified T> executeRequest(requestBuilder: () -> Request): T? {
@@ -661,7 +827,52 @@ class TrackingViewModel : ViewModel() {
 
     private inline fun <reified T> parseJsonResponse(json: String): T? {
         return try {
+            Log.d(TAG, "Parsing JSON for ${T::class.simpleName}: ${json.take(200)}...")
+
             when (T::class) {
+                List::class -> {
+                    val devices = mutableListOf<DeviceInfoResponse>()
+                    try {
+                        val jsonArray = org.json.JSONArray(json)
+                        for (i in 0 until jsonArray.length()) {
+                            val deviceObj = jsonArray.getJSONObject(i)
+                            devices.add(
+                                DeviceInfoResponse(
+                                    id = deviceObj.getString("uniqueId"), // Usar uniqueId como id
+                                    name = deviceObj.getString("name"),
+                                    uniqueId = deviceObj.optString("uniqueId", "N/A"),
+                                    status = deviceObj.optString("status", "unknown")
+                                )
+                            )
+                        }
+                    } catch (e: org.json.JSONException) {
+                        // Intentar formato con objeto devices
+                        try {
+                            val jsonObject = JSONObject(json)
+                            if (jsonObject.has("devices")) {
+                                val jsonArray = jsonObject.getJSONArray("devices")
+                                for (i in 0 until jsonArray.length()) {
+                                    val deviceObj = jsonArray.getJSONObject(i)
+                                    devices.add(
+                                        DeviceInfoResponse(
+                                            id = deviceObj.getString("uniqueId"), // Usar uniqueId como id
+                                            name = deviceObj.getString("name"),
+                                            uniqueId = deviceObj.optString("uniqueId", "N/A"),
+                                            status = deviceObj.optString("status", "unknown")
+                                        )
+                                    )
+                                }
+                            } else {
+                                Log.e(TAG, "JSON object doesn't contain 'devices' array")
+                            }
+                        } catch (e2: org.json.JSONException) {
+                            Log.e(TAG, "Failed to parse both direct array and object format", e2)
+                            throw e
+                        }
+                    }
+                    devices as T
+                }
+
                 SafeZoneResponse::class -> {
                     val jsonObject = JSONObject(json)
                     SafeZoneResponse(
@@ -669,6 +880,7 @@ class TrackingViewModel : ViewModel() {
                         longitude = jsonObject.getDouble("longitude")
                     ) as T
                 }
+
                 DeviceStatusResponse::class -> {
                     val jsonObject = JSONObject(json)
                     val deviceObj = jsonObject.getJSONObject("device")
@@ -678,6 +890,7 @@ class TrackingViewModel : ViewModel() {
                         recentPositions = jsonObject.getInt("recentPositions")
                     ) as T
                 }
+
                 LastPositionResponse::class -> {
                     val jsonObject = JSONObject(json)
                     LastPositionResponse(
@@ -685,14 +898,25 @@ class TrackingViewModel : ViewModel() {
                         longitude = jsonObject.getDouble("longitude")
                     ) as T
                 }
+
+                AssociateDeviceResponse::class -> {
+                    val jsonObject = JSONObject(json)
+                    AssociateDeviceResponse(
+                        id = jsonObject.getInt("id"),
+                        name = jsonObject.getString("name"),
+                        uniqueId = jsonObject.getString("uniqueId")
+                    ) as T
+                }
+
                 AvailableDevicesResponse::class -> {
-                    val jsonArray = JSONObject(json).getJSONArray("devices")
+                    val jsonObject = JSONObject(json)
+                    val jsonArray = jsonObject.getJSONArray("devices")
                     val devices = mutableListOf<DeviceInfoResponse>()
                     for (i in 0 until jsonArray.length()) {
                         val deviceObj = jsonArray.getJSONObject(i)
                         devices.add(
                             DeviceInfoResponse(
-                                id = deviceObj.getInt("id"),
+                                id = deviceObj.getInt("id").toString(),
                                 name = deviceObj.getString("name"),
                                 uniqueId = deviceObj.optString("uniqueId", "N/A"),
                                 status = deviceObj.optString("status", "unknown")
@@ -701,26 +925,37 @@ class TrackingViewModel : ViewModel() {
                     }
                     AvailableDevicesResponse(devices) as T
                 }
-                List::class -> {
-                    val jsonArray = JSONObject(json).getJSONArray("devices")
-                    val devices = mutableListOf<DeviceInfoResponse>()
-                    for (i in 0 until jsonArray.length()) {
-                        val deviceObj = jsonArray.getJSONObject(i)
-                        devices.add(
-                            DeviceInfoResponse(
-                                id = deviceObj.getInt("id"),
-                                name = deviceObj.getString("name"),
-                                uniqueId = deviceObj.optString("uniqueId", "N/A"),
-                                status = deviceObj.optString("status", "unknown")
-                            )
-                        )
+
+                GPSConfigResponse::class -> {
+                    val jsonObject = JSONObject(json)
+                    val endpointsObj = jsonObject.getJSONObject("gpsEndpoints")
+                    val instructionsObj = jsonObject.getJSONObject("instructions")
+
+                    val endpoints = mutableMapOf<String, String>()
+                    endpointsObj.keys().forEach { key ->
+                        endpoints[key] = endpointsObj.getString(key)
                     }
-                    devices as T
+
+                    val instructions = mutableMapOf<String, String>()
+                    instructionsObj.keys().forEach { key ->
+                        instructions[key] = instructionsObj.getString(key)
+                    }
+
+                    GPSConfigResponse(
+                        recommendedEndpoint = jsonObject.getString("recommendedEndpoint"),
+                        gpsEndpoints = endpoints,
+                        instructions = instructions
+                    ) as T
                 }
-                else -> null
+
+                else -> {
+                    Log.w(TAG, "Unknown type for parsing: ${T::class.simpleName}")
+                    null
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing ${T::class.simpleName}: ${e.message}")
+            Log.e(TAG, "Error parsing ${T::class.simpleName}: ${e.message}", e)
+            Log.e(TAG, "Failed JSON: $json")
             null
         }
     }
@@ -730,7 +965,6 @@ class TrackingViewModel : ViewModel() {
     }
 
     private fun cleanupCaches() {
-        val now = System.currentTimeMillis()
         positionCache.values.removeAll { !it.isValid() }
         deviceStatusCache.values.removeAll { !it.isValid() }
         safeZoneCache.values.removeAll { !it.isValid() }
@@ -739,14 +973,7 @@ class TrackingViewModel : ViewModel() {
                 deviceListCache.set(null)
             }
         }
-        Log.d(TAG, "Limpieza de caché completada")
-    }
-
-    private fun clearCachesForDevice(deviceId: Int) {
-        positionCache.remove(deviceId)
-        deviceStatusCache.remove(deviceId)
-        safeZoneCache.remove(deviceId)
-        deviceListCache.set(null)
+        Log.d(TAG, "Cache cleanup completed")
     }
 
     private fun handleError(message: String, exception: Exception) {
@@ -754,7 +981,7 @@ class TrackingViewModel : ViewModel() {
         postError(message)
     }
 
-    fun postError(message: String) {
+    private fun postError(message: String) {
         _error.value = message
     }
 
@@ -779,13 +1006,6 @@ class TrackingViewModel : ViewModel() {
     data class AssociateDeviceResponse(val id: Int, val name: String, val uniqueId: String)
 
     data class AvailableDevicesResponse(val devices: List<DeviceInfoResponse>)
-
-    data class DeviceInfoResponse(
-        val id: Int,
-        val name: String,
-        val uniqueId: String?,
-        val status: String?
-    )
 
     data class GPSConfigResponse(
         val recommendedEndpoint: String,

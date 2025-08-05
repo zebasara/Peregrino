@@ -431,7 +431,7 @@ class SyncWorker(
         }
     }
 
-    private suspend fun handleSyncFailure(errorMessage: String): Result {
+    private fun handleSyncFailure(errorMessage: String): Result {
         val currentRetries = retryCount.get()
         return if (currentRetries < MAX_RETRIES && isRetriableError(errorMessage)) {
             retryCount.incrementAndGet()
