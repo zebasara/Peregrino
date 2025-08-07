@@ -1,7 +1,6 @@
 package com.zebass.peregrino
 
 import android.Manifest
-import android.R.drawable
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -10,7 +9,11 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.*
 import android.graphics.drawable.BitmapDrawable
+import android.location.Location
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,7 +27,6 @@ import android.widget.EditText
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
-import androidx.core.content.ContextCompat.getDrawable
 import androidx.core.content.edit
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
@@ -41,6 +43,8 @@ import com.zebass.peregrino.service.TrackingService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
@@ -55,11 +59,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
+
 class SecondFragment : Fragment() {
 
     // ============ BINDING Y PROPIEDADES CORE ============
     private var _binding: FragmentSecondBinding? = null
-    private val binding get() = _binding!!
+    private val binding get() = _binding ?: run {
+        Log.w(TAG, "Binding accessed when null - fragment may be destroyed")
+        throw IllegalStateException("Fragment binding is null - fragment destroyed")
+    }
     private lateinit var sharedPreferences: SharedPreferences
     private val args: SecondFragmentArgs by navArgs()
     private val viewModel: TrackingViewModel by viewModels()
@@ -90,6 +98,19 @@ class SecondFragment : Fragment() {
     private val handler = Handler(Looper.getMainLooper())
     private var statusCheckRunnable: Runnable? = null
     private var reconnectRunnable: Runnable? = null
+
+    // ============ NUEVAS VARIABLES PARA SEGUIMIENTO ============
+    private val isFollowingVehicle = AtomicBoolean(false)
+    private var currentVehicleState = VehicleState.NORMAL
+    private var safeZoneCenter: GeoPoint? = null
+
+    // ============ ENUMS Y CONSTANTES ============
+    enum class VehicleState {
+        NORMAL,        // Verde - funcionamiento normal
+        IN_SAFE_ZONE,  // Azul - dentro de zona segura
+        OUTSIDE_SAFE_ZONE // Rojo - fuera de zona segura
+    }
+
 
     // ============ CACHE LOCAL ULTRA-RÁPIDO ============
     private data class LocalCache<T>(
@@ -122,6 +143,8 @@ class SecondFragment : Fragment() {
     companion object {
         var JWT_TOKEN: String? = ""
         private var safeZone: GeoPoint? = null
+
+        // ============ CONSTANTES CORREGIDAS ============
         const val PREF_SAFEZONE_LAT = "safezone_lat"
         const val PREF_SAFEZONE_LON = "safezone_lon"
         const val DEVICE_ID_PREF = "associated_device_id"
@@ -130,8 +153,14 @@ class SecondFragment : Fragment() {
         const val GEOFENCE_RADIUS = 15.0
         const val RECONNECT_DELAY = 5000L
         const val STATUS_CHECK_INTERVAL = 30000L
-        const val POSITION_UPDATE_THROTTLE = 1000L // Mínimo 1s entre updates
+        const val POSITION_UPDATE_THROTTLE = 1000L
         const val TAG = "SecondFragment"
+
+        // ============ NUEVAS CONSTANTES PARA SEGUIMIENTO ============
+        const val FOLLOW_ZOOM_LEVEL = 18.0
+        const val OVERVIEW_ZOOM_LEVEL = 12.0
+        const val TANDIL_LAT = -37.32167
+        const val TANDIL_LON = -59.13316
     }
 
     private val locationPermissionLauncher = registerForActivityResult(
@@ -167,7 +196,7 @@ class SecondFragment : Fragment() {
             tileFileSystemThreads = 4                            // Threads para acceso a archivos
 
             // ===== CONFIGURACIÓN DE RED =====
-            userAgentValue = "PeregrinoGPS/1.0"                 // CORREGIDO
+            userAgentValue = "PeregrinoGPS/1.0"
 
             // ===== CONFIGURACIÓN DE DEBUG =====
             isDebugMode = false                                  // Sin debug para mejor rendimiento
@@ -180,14 +209,35 @@ class SecondFragment : Fragment() {
         return binding.root
     }
 
+    private fun restoreDeviceFromPreferences(): Boolean {
+        val prefs = requireContext().getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
 
+        val uniqueId = prefs.getString(DEVICE_UNIQUE_ID_PREF, null)
+        val deviceName = prefs.getString(DEVICE_NAME_PREF, null)
+        val deviceId = prefs.getInt(DEVICE_ID_PREF, -1)
+
+        if (uniqueId != null && deviceName != null && deviceId != -1) {
+            Log.d(TAG, "✅ Device restored from preferences: uniqueId=$uniqueId, name=$deviceName")
+
+            // Actualizar UI inmediatamente
+            updateStatusUI("📱 $deviceName", android.R.color.holo_green_dark)
+
+            return true
+        } else {
+            Log.w(TAG, "❌ No device found in preferences")
+            return false
+        }
+    }
     // Fix en onViewCreated para mejor inicialización
     @RequiresApi(Build.VERSION_CODES.O)
     @SuppressLint("MissingPermission")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-
+        // ✅ RESTAURAR DISPOSITIVO INMEDIATAMENTE
+        if (!restoreDeviceFromPreferences()) {
+            // Solo mostrar asociar si no hay dispositivo guardado
+            updateStatusUI("Asocia un vehículo para comenzar", android.R.color.darker_gray)
+        }
         val userEmail = args.userEmail
         JWT_TOKEN = args.jwtToken
         Log.d(TAG, "🚀 onViewCreated: userEmail=$userEmail, hasToken=${!JWT_TOKEN.isNullOrEmpty()}")
@@ -359,26 +409,197 @@ class SecondFragment : Fragment() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun setupButtons() {
         with(binding) {
+            // Botón de ubicación con seguimiento del vehículo
             buttonMyLocation.setOnClickListener {
-                centerOnMyLocation()
+                toggleVehicleFollowing()
             }
 
-            // Long click para centrar en vehículo
+            // Long click para centrar en mi ubicación
             buttonMyLocation.setOnLongClickListener {
-                centerOnVehicle()
+                centerOnMyLocation()
                 true
             }
 
             buttonZonaSegura.setOnClickListener { handleSafeZoneButton() }
+            buttonZonaSeguraMain.setOnClickListener { handleSafeZoneButton() }
             buttonAssociateDevice.setOnClickListener { showAssociateDeviceDialog() }
             buttonDeviceStatus.setOnClickListener { checkDeviceStatus() }
             buttonShowConfig.setOnClickListener { showTraccarClientConfig() }
 
+            // Actualizar texto del botón para reflejar nueva funcionalidad
+            updateFollowButtonText()
+
             // Ocultar elementos no necesarios
             buttonDescargarOffline.visibility = View.GONE
             progressBarDownload.visibility = View.GONE
+            // En setupButtons() después de los otros botones:
+            binding.buttonDeviceStatus.setOnLongClickListener {
+                // Long press para debug
+                viewModel.debugSafeZoneState { debugInfo ->
+                    MaterialAlertDialogBuilder(requireContext())
+                        .setTitle("Debug Zona Segura")
+                        .setMessage(debugInfo)
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+                true
+            }
         }
-        Log.d(TAG, "✅ Botones configurados - Mi ubicación (tap), Vehículo (long press)")
+        Log.d(TAG, "✅ Botones configurados - Seguimiento vehículo mejorado")
+    }
+    // ============ ACTUALIZACIÓN DINÁMICA DE ICONOS ============
+    private fun updateMarkerIcon(marker: Marker, state: VehicleState) {
+        // Crear bitmap personalizado con forma y color
+        val size = 48 // Tamaño en píxeles
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        // Color según estado
+        val color = when (state) {
+            VehicleState.NORMAL -> Color.GREEN
+            VehicleState.IN_SAFE_ZONE -> Color.BLUE
+            VehicleState.OUTSIDE_SAFE_ZONE -> Color.RED
+        }
+
+        // Dibujar círculo de fondo blanco
+        paint.color = Color.WHITE
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f - 2, paint)
+
+        // Dibujar círculo principal de color
+        paint.color = color
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f - 6, paint)
+
+        // Dibujar punto central más oscuro
+        paint.color = when (state) {
+            VehicleState.NORMAL -> Color.parseColor("#006400") // Verde oscuro
+            VehicleState.IN_SAFE_ZONE -> Color.parseColor("#000080") // Azul oscuro
+            VehicleState.OUTSIDE_SAFE_ZONE -> Color.parseColor("#8B0000") // Rojo oscuro
+        }
+        canvas.drawCircle(size / 2f, size / 2f, 8f, paint)
+
+        // Aplicar el bitmap al marcador
+        marker.icon = BitmapDrawable(requireContext().resources, bitmap)
+
+        Log.d(TAG, "🎨 Updated marker icon for state: $state with custom bitmap")
+    }
+    // ============ NUEVA FUNCIÓN PARA ALTERNAR SEGUIMIENTO ============
+    private fun toggleVehicleFollowing() {
+        if (vehicleMarker.get() == null) {
+            showSnackbar("⚠️ No hay vehículo para seguir", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        val wasFollowing = isFollowingVehicle.get()
+        isFollowingVehicle.set(!wasFollowing)
+
+        if (isFollowingVehicle.get()) {
+            // Activar seguimiento - centrar en vehículo
+            vehicleMarker.get()?.position?.let { position ->
+                map?.controller?.animateTo(position, FOLLOW_ZOOM_LEVEL, 1000L)
+                showSnackbar("🎯 Siguiendo al vehículo", Snackbar.LENGTH_SHORT)
+                Log.d(TAG, "🎯 Vehicle following activated")
+            }
+        } else {
+            // Desactivar seguimiento - vista general de Tandil
+            val tandilPosition = GeoPoint(TANDIL_LAT, TANDIL_LON)
+            map?.controller?.animateTo(tandilPosition, OVERVIEW_ZOOM_LEVEL, 1000L)
+            showSnackbar("🗺️ Vista general activada", Snackbar.LENGTH_SHORT)
+            Log.d(TAG, "🗺️ Vehicle following deactivated - overview mode")
+        }
+
+        updateFollowButtonText()
+    }
+
+    private fun updateFollowButtonText() {
+        binding.buttonMyLocation.text = if (isFollowingVehicle.get()) {
+            "🎯 Siguiendo"
+        } else {
+            "📍 Ubicación"
+        }
+    }
+    // AGREGAR esta función nueva en SecondFragment.kt
+    private fun refreshJWTToken() {
+        val userEmail = args.userEmail
+
+        // ✅ INTENTAR OBTENER PASSWORD DE PREFERENCIAS
+        val userPassword = sharedPreferences.getString("user_password", null)
+
+        if (userPassword == null) {
+            Log.e(TAG, "❌ No password saved - cannot refresh token")
+            forceLogout()
+            return
+        }
+
+        Log.d(TAG, "🔄 Refreshing JWT token for user: $userEmail")
+
+        lifecycleScope.launch {
+            try {
+                val json = JSONObject().apply {
+                    put("email", userEmail)
+                    put("password", userPassword)
+                }
+
+                val requestBody = json.toString().toRequestBody("application/json".toMediaType())
+
+                val request = Request.Builder()
+                    .url("https://carefully-arriving-shepherd.ngrok-free.app/api/auth/login")
+                    .post(requestBody)
+                    .build()
+
+                val response = client.newCall(request).execute()
+
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    val responseJson = JSONObject(responseBody ?: "")
+                    val newToken = responseJson.getString("token")
+
+                    // ✅ ACTUALIZAR TOKEN GLOBALMENTE
+                    JWT_TOKEN = newToken
+
+                    // ✅ GUARDAR EN PREFERENCIAS
+                    sharedPreferences.edit {
+                        putString("jwt_token", newToken)
+                    }
+
+                    Log.d(TAG, "✅ JWT token refreshed successfully")
+                    showSnackbar("✅ Token renovado automáticamente", Snackbar.LENGTH_SHORT)
+
+                    // ✅ REINICIAR SERVICIOS CON NUEVO TOKEN
+                    setupWebSocket()
+
+                } else {
+                    Log.e(TAG, "❌ Token refresh failed: ${response.code}")
+                    forceLogout()
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to refresh token: ${e.message}")
+                forceLogout()
+            }
+        }
+    }
+
+    // ✅ NUEVA FUNCIÓN PARA LOGOUT FORZADO
+    private fun forceLogout() {
+        Log.d(TAG, "🚪 Forcing logout due to authentication failure")
+
+        sharedPreferences.edit {
+            remove("jwt_token")
+            remove("user_email")
+            remove("user_password") // También limpiar password
+            remove(DEVICE_ID_PREF)
+            remove(DEVICE_NAME_PREF)
+            remove(DEVICE_UNIQUE_ID_PREF)
+        }
+
+        // ✅ LIMPIAR ESTADO
+        shouldReconnect.set(false)
+        cancelStatusCheck()
+        webSocket?.close(1000, "Force logout")
+
+        findNavController().navigate(R.id.action_SecondFragment_to_FirstFragment)
+        showSnackbar("Sesión expirada. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
     }
     // ============ FIX 10: Nueva función para centrar en ubicación personal ============
     private suspend fun setupMap() = withContext(Dispatchers.Main) {
@@ -434,15 +655,17 @@ class SecondFragment : Fragment() {
 
     // Fix en hasAssociatedDevice para mejor validation
     private fun hasAssociatedDevice(): Boolean {
-        val deviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
-        val deviceName = sharedPreferences.getString(DEVICE_NAME_PREF, null)
-        val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
+        val prefs = requireContext().getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        val uniqueId = prefs.getString(DEVICE_UNIQUE_ID_PREF, null)
+        val deviceName = prefs.getString(DEVICE_NAME_PREF, null)
 
-        val hasDevice = deviceId != -1 &&
-                !deviceName.isNullOrEmpty() &&
-                !deviceUniqueId.isNullOrEmpty()
+        val hasDevice = !uniqueId.isNullOrEmpty() && !deviceName.isNullOrEmpty()
 
-        Log.d(TAG, "hasAssociatedDevice: $hasDevice (deviceId=$deviceId, name=$deviceName, uniqueId=$deviceUniqueId)")
+        if (hasDevice) {
+            Log.d(TAG, "✅ Device found: uniqueId=$uniqueId, name=$deviceName")
+        } else {
+            Log.w(TAG, "❌ No associated device found")
+        }
 
         return hasDevice
     }
@@ -450,12 +673,17 @@ class SecondFragment : Fragment() {
         // Observar posición del vehículo
         lifecycleScope.launch {
             viewModel.vehiclePosition.collectLatest { position ->
+                Log.d(TAG, "🔍 Vehicle position observer triggered: $position")
                 position?.let {
                     if (shouldUpdatePosition()) {
                         Log.d(TAG, "🚗 Vehicle position from ViewModel: deviceId=${it.first}, position=${it.second}")
                         updateVehiclePosition(it.first, GeoPoint(it.second.latitude, it.second.longitude))
                         lastPositionUpdate.set(System.currentTimeMillis())
+                    } else {
+                        Log.d(TAG, "⏳ Vehicle position update throttled")
                     }
+                } ?: run {
+                    Log.d(TAG, "❌ Vehicle position is null")
                 }
             }
         }
@@ -528,6 +756,7 @@ class SecondFragment : Fragment() {
 
     // ============ SERVICIOS OPTIMIZADOS ============
 
+    @RequiresApi(Build.VERSION_CODES.O)
     private suspend fun startServices() = withContext(Dispatchers.IO) {
         launch { startTrackingService() }
         launch { setupWebSocket() }
@@ -546,20 +775,44 @@ class SecondFragment : Fragment() {
 
 
 
+    // REEMPLAZAR la función startTrackingService completa
     private fun startTrackingService() {
-        if (!hasAssociatedDevice()) return
+        if (!hasAssociatedDevice()) {
+            Log.e(TAG, "❌ No associated device for TrackingService")
+            return
+        }
+
+        val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
+        if (deviceUniqueId == null) {
+            Log.e(TAG, "❌ No deviceUniqueId for TrackingService")
+            return
+        }
+
+        // ✅ OBTENER DEVICE_ID TAMBIÉN (NECESARIO PARA EL SERVICIO)
+        val deviceId = sharedPreferences.getInt(DEVICE_ID_PREF, -1)
+
+        Log.d(TAG, "🚀 Starting TrackingService with:")
+        Log.d(TAG, "   deviceUniqueId: $deviceUniqueId")
+        Log.d(TAG, "   deviceId: $deviceId")
+        Log.d(TAG, "   jwtToken: ${if (JWT_TOKEN.isNullOrEmpty()) "MISSING" else "OK"}")
 
         val intent = Intent(requireContext(), TrackingService::class.java).apply {
             putExtra("jwtToken", JWT_TOKEN)
-            putExtra("deviceId", sharedPreferences.getInt(DEVICE_ID_PREF, -1))
+            putExtra("deviceUniqueId", deviceUniqueId)
+            putExtra("deviceId", deviceId) // ✅ AGREGAR ESTE EXTRA
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            requireContext().startForegroundService(intent)
-        } else {
-            requireContext().startService(intent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                requireContext().startForegroundService(intent)
+            } else {
+                requireContext().startService(intent)
+            }
+            Log.d(TAG, "✅ TrackingService iniciado correctamente")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error starting TrackingService: ${e.message}")
+            showSnackbar("❌ Error iniciando servicio de rastreo", Snackbar.LENGTH_LONG)
         }
-        Log.d(TAG, "TrackingService iniciado")
     }
 
     private fun schedulePeriodicSync() {
@@ -582,6 +835,7 @@ class SecondFragment : Fragment() {
         return sdf.format(java.util.Date())
     }
     // Fix en fetchInitialPosition con mejor error handling
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun fetchInitialPosition() {
         if (!hasAssociatedDevice()) {
             Log.w(TAG, "⚠️ No associated device for initial position fetch")
@@ -612,6 +866,27 @@ class SecondFragment : Fragment() {
                 // Pasar uniqueId REAL al ViewModel
                 val position = viewModel.getLastPosition(deviceUniqueId)
                 val geoPoint = GeoPoint(position.latitude, position.longitude)
+                val timestampStr = position.timestamp
+                try {
+                    val timestamp = if (!timestampStr.isNullOrEmpty()) {
+                        java.time.Instant.parse(timestampStr).toEpochMilli()
+                    } else {
+                        System.currentTimeMillis()
+                    }
+                    val minutesOld = (System.currentTimeMillis() - timestamp) / 1000 / 60
+                    val absMinutesOld = kotlin.math.abs(minutesOld)
+                    if (absMinutesOld > 60) { // 1 hora máximo
+                        Log.w(TAG, "❌ Position timestamp issue for deviceUniqueId=$deviceUniqueId, $minutesOld minutes difference")
+                        updateStatusUI("❌ Problema de timestamp - verifica configuración", android.R.color.holo_red_dark)
+                        return@launch
+                    }
+
+                    if (absMinutesOld > 15) { // Advertir pero continuar
+                        Log.w(TAG, "⚠️ Position getting old for deviceUniqueId=$deviceUniqueId, $minutesOld minutes but processing")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ No se pudo parsear el timestamp: $timestampStr, asumiendo posición reciente")
+                }
 
                 Log.d(TAG, "✅ Initial position fetched for uniqueId $deviceUniqueId: lat=${position.latitude}, lon=${position.longitude}")
                 updateVehiclePosition(deviceUniqueId.toIntOrNull() ?: deviceUniqueId.hashCode(), geoPoint)
@@ -676,37 +951,63 @@ class SecondFragment : Fragment() {
 
 
     // Fix en handlePositionUpdate con mejor logging
+    // REEMPLAZAR la función handlePositionUpdate
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun handlePositionUpdate(json: JSONObject, expectedDeviceUniqueId: String) {
         try {
             val data = json.getJSONObject("data")
-            val deviceId = data.getString("deviceId") // uniqueId como string
+            val deviceId = data.getString("deviceId")
             val lat = data.getDouble("latitude")
             val lon = data.getDouble("longitude")
-            val timestamp = data.optString("timestamp", "")
+            val timestampStr = data.optString("timestamp", "")
 
-            Log.d(TAG, "📍 Position update received: deviceUniqueId=$deviceId, lat=$lat, lon=$lon")
+            Log.d(TAG, "📨 WebSocket position update:")
+            Log.d(TAG, "   DeviceId: $deviceId")
+            Log.d(TAG, "   Expected: $expectedDeviceUniqueId")
+            Log.d(TAG, "   Position: $lat, $lon")
+            Log.d(TAG, "   Timestamp: $timestampStr")
 
-            // Verificar que es nuestro dispositivo usando uniqueId
+            // ✅ VERIFICAR DISPOSITIVO CORRECTO
             if (deviceId != expectedDeviceUniqueId) {
-                Log.w(TAG, "⚠️ Position for different device: received=$deviceId, expected=$expectedDeviceUniqueId")
+                Log.w(TAG, "❌ Position for wrong device: received=$deviceId, expected=$expectedDeviceUniqueId")
                 return
+            }
+
+            // ✅ TIMESTAMP PARSING MEJORADO
+            val timestamp = try {
+                when {
+                    timestampStr.isEmpty() -> System.currentTimeMillis()
+                    timestampStr.contains('T') -> {
+                        java.time.Instant.parse(timestampStr).toEpochMilli()
+                    }
+                    timestampStr.all { it.isDigit() } -> {
+                        val ts = timestampStr.toLong()
+                        if (ts < 9999999999L) ts * 1000L else ts
+                    }
+                    else -> System.currentTimeMillis()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Timestamp parse error, using current time: ${e.message}")
+                System.currentTimeMillis()
+            }
+
+            // ✅ VALIDACIÓN DE EDAD MÁS PERMISIVA
+            val ageMinutes = (System.currentTimeMillis() - timestamp) / 60000L
+            if (ageMinutes > 30) {
+                Log.w(TAG, "⚠️ Old position (${ageMinutes} min) but processing anyway...")
             }
 
             lifecycleScope.launch(Dispatchers.Main) {
                 if (shouldUpdatePosition()) {
-                    Log.d(TAG, "🔄 Processing position update on main thread")
-
-                    // CAMBIO CRÍTICO: Usar el ViewModel para actualizar la posición
+                    Log.d(TAG, "🔄 Updating vehicle position from WebSocket")
                     val geoPoint = GeoPoint(lat, lon)
-                    viewModel.updateVehiclePosition(deviceId, geoPoint)
 
-                    // También actualizar directamente el mapa para asegurar que se muestre
+                    // ✅ ACTUALIZAR VIEWMODEL Y UI
+                    viewModel.updateVehiclePosition(deviceId, geoPoint, timestamp)
                     updateVehiclePosition(deviceId.hashCode(), geoPoint)
 
                     lastPositionUpdate.set(System.currentTimeMillis())
-
-                    // Update status
-                    updateStatusUI("🟢 Última actualización: ${getCurrentTime()}", android.R.color.holo_green_dark)
+                    updateStatusUI("🟢 Actualizado: ${getCurrentTime()}", android.R.color.holo_green_dark)
 
                     Log.d(TAG, "✅ Position update completed successfully")
                 } else {
@@ -744,77 +1045,116 @@ class SecondFragment : Fragment() {
 
         lastPositionCache.set(position)
 
+        // Verificar zona segura ANTES de actualizar el marcador
+        val newState = determineVehicleState(position)
+        currentVehicleState = newState
+
         // ===== GESTIÓN DE MARCADOR OPTIMIZADA =====
         var marker = vehicleMarker.get()
         if (marker == null) {
             // Primera vez - crear marcador
-            marker = createVehicleMarker(deviceId, position)
+            marker = createVehicleMarker(deviceId, position, newState)
             vehicleMarker.set(marker)
             map?.overlays?.add(marker)
 
-            // Solo centrar en el primer marcador
-            map?.controller?.animateTo(position, 16.0, 1000L)
+            // Solo centrar en el primer marcador si no estamos siguiendo
+            if (!isFollowingVehicle.get()) {
+                map?.controller?.animateTo(position, 16.0, 1000L)
+            }
             Log.d(TAG, "✅ Created vehicle marker and centered (first time only)")
 
         } else {
-            // Actualizaciones - solo mover marcador
-            updateMarkerPosition(marker, deviceId, position)
-            Log.d(TAG, "✅ Updated vehicle marker position (no map movement)")
+            // Actualizaciones - mover marcador y actualizar icono
+            updateMarkerPosition(marker, deviceId, position, newState)
+            // AGREGAR ESTA LÍNEA para forzar actualización visual:
+            map?.invalidate() // Forzar redibujado del mapa
+            Log.d(TAG, "✅ Updated vehicle marker position")
         }
 
-        // Verificar zona segura
+        // Si estamos siguiendo al vehículo, mantener centrado
+        if (isFollowingVehicle.get()) {
+            map?.controller?.animateTo(position, FOLLOW_ZOOM_LEVEL, 800L)
+            Log.d(TAG, "🎯 Following vehicle - map centered on new position")
+        }
+
+        // Verificar zona segura para alertas
         checkSafeZone(position, deviceId)
 
         // ===== INVALIDACIÓN OPTIMIZADA =====
-        map?.invalidate()  // CORREGIDO
+        map?.invalidate()
     }
 
+    private fun determineVehicleState(vehiclePosition: GeoPoint): VehicleState {
+        val safeZoneCenter = safeZoneCenter
 
-    private fun createVehicleMarker(deviceId: Int, position: GeoPoint): Marker {
-        return Marker(map).apply {
-            this.position = position
-
-            // ===== CONFIGURACIÓN DE ANCHOR OPTIMIZADA =====
-            setAnchor(0.5f, 1.0f)           // Centro-abajo para mejor visibilidad
-
-            // ===== ICONO OPTIMIZADO =====
-            icon = ContextCompat.getDrawable(requireContext(), R.drawable.ic_vehicle)
-
-            // ===== CONFIGURACIÓN DE RENDIMIENTO =====
-            title = formatMarkerTitle(deviceId, position)
-            isDraggable = false
-            setInfoWindow(null)              // Sin info window para mejor rendimiento
-
-            // ===== CONFIGURACIÓN VISUAL =====
-            alpha = 1.0f                     // Totalmente opaco
+        return if (safeZoneCenter != null) {
+            val distance = safeZoneCenter.distanceToAsDouble(vehiclePosition)
+            if (distance <= GEOFENCE_RADIUS) {
+                VehicleState.IN_SAFE_ZONE
+            } else {
+                VehicleState.OUTSIDE_SAFE_ZONE
+            }
+        } else {
+            VehicleState.NORMAL
         }
     }
 
 
-    private fun updateMarkerPosition(marker: Marker, deviceId: Int, position: GeoPoint) {
+    private fun createVehicleMarker(deviceId: Int, position: GeoPoint, state: VehicleState): Marker {
+        return Marker(map).apply {
+            this.position = position
+            setAnchor(0.5f, 1.0f) // Centro-abajo para mejor visibilidad
+
+            // Configurar icono según estado
+            updateMarkerIcon(this, state)
+
+            title = formatMarkerTitle(deviceId, position)
+            isDraggable = false
+            setInfoWindow(null) // Sin info window para mejor rendimiento
+            alpha = 1.0f // Totalmente opaco para máxima visibilidad
+        }
+    }
+
+    private fun updateMarkerPosition(marker: Marker, deviceId: Int, position: GeoPoint, state: VehicleState) {
         marker.position = position
         marker.title = formatMarkerTitle(deviceId, position)
+        updateMarkerIcon(marker, state)
     }
+
 
     private fun formatMarkerTitle(deviceId: Int, position: GeoPoint): String {
         return "Vehículo ID: $deviceId\nLat: ${"%.6f".format(position.latitude)}\nLon: ${"%.6f".format(position.longitude)}"
     }
 
     private fun checkSafeZone(position: GeoPoint, deviceId: Int) {
-        safeZone?.let { zone ->
-            val distance = zone.distanceToAsDouble(position)
-            val marker = vehicleMarker.get()
+        safeZoneCenter?.let { center ->
+            // Usar distancia más precisa
+            val distance = calculateAccurateDistance(center, position)
+
+            Log.d(TAG, "📏 Distance to safe zone: ${String.format("%.2f", distance)}m")
 
             if (distance > GEOFENCE_RADIUS) {
-                marker?.icon = getDrawable(requireContext(), R.drawable.ic_vehicle_alert)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     triggerAlarm(deviceId, distance)
                 }
+                Log.d(TAG, "🚨 Vehicle outside safe zone: ${String.format("%.1f", distance)}m")
             } else {
-                marker?.icon = getDrawable(requireContext(), R.drawable.ic_vehicle)
+                Log.d(TAG, "✅ Vehicle inside safe zone: ${String.format("%.1f", distance)}m")
             }
         }
     }
+
+    // ============ CÁLCULO DE DISTANCIA MÁS PRECISO ============
+    private fun calculateAccurateDistance(point1: GeoPoint, point2: GeoPoint): Double {
+        val results = FloatArray(1)
+        Location.distanceBetween(
+            point1.latitude, point1.longitude,
+            point2.latitude, point2.longitude,
+            results
+        )
+        return results[0].toDouble()
+    }
+
 
     @RequiresApi(Build.VERSION_CODES.O)
     private fun triggerAlarm(deviceId: Int, distance: Double) {
@@ -836,18 +1176,21 @@ class SecondFragment : Fragment() {
 
         Log.d(TAG, "🛡️ Updating safe zone UI at position: lat=${position.latitude}, lon=${position.longitude}")
 
+        // Guardar centro de zona segura
+        safeZoneCenter = position
+
         // Remover polígono anterior
         safeZonePolygon.get()?.let {
             map?.overlays?.remove(it)
             Log.d(TAG, "🗑️ Removed previous safe zone polygon")
         }
 
-        // Crear nuevo polígono
+        // Crear nuevo polígono más visible
         val polygon = Polygon().apply {
             points = Polygon.pointsAsCircle(position, GEOFENCE_RADIUS)
-            fillColor = 0x33FF6B6B // Rojo semi-transparente más visible
-            strokeColor = android.graphics.Color.RED
-            strokeWidth = 3f // Línea más gruesa
+            fillColor = 0x33007FFF // Azul semi-transparente más visible
+            strokeColor = Color.BLUE
+            strokeWidth = 4f // Línea más gruesa
         }
 
         safeZonePolygon.set(polygon)
@@ -857,21 +1200,23 @@ class SecondFragment : Fragment() {
         // Actualizar botón
         updateSafeZoneButton(true)
 
-        // NO centrar automáticamente para permitir navegación libre
-        // Solo centrar si estamos muy lejos
-        val currentCenter = map?.mapCenter
-        val currentDistance = currentCenter?.let {
-            GeoPoint(it.latitude, it.longitude).distanceToAsDouble(position)
-        } ?: Double.MAX_VALUE
+        // Solo centrar si no estamos siguiendo vehículo
+        if (!isFollowingVehicle.get()) {
+            val currentCenter = map?.mapCenter
+            val currentDistance = currentCenter?.let {
+                GeoPoint(it.latitude, it.longitude).distanceToAsDouble(position)
+            } ?: Double.MAX_VALUE
 
-        if (currentDistance > 2000.0) { // Solo si estamos muy lejos (2km+)
-            Log.d(TAG, "📍 Centering map on safe zone (far away)")
-            map?.controller?.animateTo(position, 17.0, 500L)
+            if (currentDistance > 2000.0) { // Solo si estamos muy lejos (2km+)
+                Log.d(TAG, "📍 Centering map on safe zone (far away)")
+                map?.controller?.animateTo(position, 17.0, 500L)
+            }
         }
 
-        map?.invalidate()  // CORREGIDO
+        map?.invalidate()
         Log.d(TAG, "✅ Safe zone UI updated completely")
     }
+
 
 
 
@@ -902,14 +1247,13 @@ class SecondFragment : Fragment() {
 
     // ============ FUNCIONES DE DISPOSITIVO OPTIMIZADAS ============
 
-    private fun updateStatusUI(message: String, colorResId: Int) {
-        binding.textDeviceStatus.apply {
-            text = message
-            visibility = View.VISIBLE
-            setTextColor(ContextCompat.getColor(requireContext(), colorResId))
+    private fun updateStatusUI(message: String, colorResId: Int? = null) {
+        // ✅ VERIFICAR QUE BINDING NO SEA NULL
+        if (!isAdded || _binding == null) {
+            Log.w(TAG, "Fragment not attached or binding is null, skipping UI update")
+            return
         }
     }
-
     private fun startPeriodicStatusCheck() {
         if (!hasAssociatedDevice()) return
 
@@ -957,6 +1301,7 @@ class SecondFragment : Fragment() {
 
     // ============ ZONA SEGURA OPTIMIZADA ============
 
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun handleSafeZoneButton() {
         if (safeZone == null) {
             enterSafeZoneSetupMode()
@@ -965,6 +1310,7 @@ class SecondFragment : Fragment() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun enterSafeZoneSetupMode() {
         if (!hasAssociatedDevice()) {
             showSnackbar("Asocia un vehículo primero", Snackbar.LENGTH_SHORT)
@@ -980,13 +1326,13 @@ class SecondFragment : Fragment() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun establishSafeZoneForDevice(deviceIdString: String) {
         if (JWT_TOKEN.isNullOrEmpty()) {
             showSnackbar("Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
             handleUnauthorizedError()
             return
         }
-
         // USAR SIEMPRE EL UNIQUE_ID REAL DE LAS PREFERENCIAS
         val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
         if (deviceUniqueId == null) {
@@ -997,10 +1343,9 @@ class SecondFragment : Fragment() {
         Log.d(TAG, "🛡️ Establishing safe zone for REAL uniqueId: $deviceUniqueId")
 
         binding.buttonZonaSegura.apply {
-            text = "Obteniendo ubicación del vehículo..."
+            text = "Obteniendo ubicación del vehículo..."  // ✅ Usar text directamente
             isEnabled = false
         }
-
         lifecycleScope.launch {
             try {
                 // Usar uniqueId REAL para obtener posición
@@ -1046,8 +1391,6 @@ class SecondFragment : Fragment() {
         }
     }
 
-
-
     private fun toggleSafeZone() {
         if (JWT_TOKEN.isNullOrEmpty()) {
             showSnackbar("Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
@@ -1055,9 +1398,20 @@ class SecondFragment : Fragment() {
             return
         }
 
-        Log.d(TAG, "🛡️ Toggling safe zone - current state: ${safeZone != null}")
+        Log.d(TAG, "🛡️ Toggling safe zone - current state: ${safeZoneCenter != null}")
 
-        // NO hacer cambios optimistas - esperar confirmación del servidor
+        // Mostrar diálogo de confirmación para eliminación
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Eliminar Zona Segura")
+            .setMessage("¿Estás seguro de que quieres eliminar la zona segura actual? Esta acción no se puede deshacer.")
+            .setPositiveButton("Sí, eliminar") { _, _ ->
+                performSafeZoneDeletion()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun performSafeZoneDeletion() {
         binding.buttonZonaSegura.apply {
             text = "Eliminando zona segura..."
             isEnabled = false
@@ -1068,8 +1422,9 @@ class SecondFragment : Fragment() {
                 if (success) {
                     Log.d(TAG, "✅ Safe zone deletion confirmed by server")
 
-                    // AHORA sí limpiar la UI después de confirmación
+                    // Limpiar completamente
                     safeZone = null
+                    safeZoneCenter = null
                     safeZoneCache.clear()
 
                     // Remover polígono del mapa
@@ -1085,7 +1440,13 @@ class SecondFragment : Fragment() {
                         remove(PREF_SAFEZONE_LON)
                     }
 
-                    // FORZAR botón inactivo
+                    // Actualizar estado del vehículo a normal
+                    vehicleMarker.get()?.let { marker ->
+                        currentVehicleState = VehicleState.NORMAL
+                        updateMarkerIcon(marker, VehicleState.NORMAL)
+                    }
+
+                    // Actualizar UI
                     updateSafeZoneButton(false)
 
                     binding.buttonZonaSegura.apply {
@@ -1108,9 +1469,32 @@ class SecondFragment : Fragment() {
                         isEnabled = true
                     }
 
-                    showSnackbar("❌ Error al eliminar zona segura", Snackbar.LENGTH_LONG)
+                    showSnackbar("❌ Error al eliminar zona segura. Intenta nuevamente.", Snackbar.LENGTH_LONG)
                 }
             }
+        }
+    }
+
+    // ============ CENTRADO MEJORADO EN MI UBICACIÓN ============
+    @SuppressLint("MissingPermission")
+    private fun centerOnMyLocation() {
+        if (!hasLocationPermission()) {
+            showSnackbar("⚠️ Se necesitan permisos de ubicación", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        // Desactivar seguimiento del vehículo al centrar en mi ubicación
+        isFollowingVehicle.set(false)
+        updateFollowButtonText()
+
+        myLocationOverlay?.myLocation?.let { location ->
+            val myPosition = GeoPoint(location.latitude, location.longitude)
+            map?.controller?.animateTo(myPosition, 18.0, 1200L)
+            showSnackbar("📍 Centrado en tu ubicación", Snackbar.LENGTH_SHORT)
+            Log.d(TAG, "📍 Manually centered on user location - vehicle following disabled")
+        } ?: run {
+            showSnackbar("⚠️ Ubicación no disponible", Snackbar.LENGTH_SHORT)
+            Log.w(TAG, "⚠️ User location not available for centering")
         }
     }
 
@@ -1221,6 +1605,7 @@ class SecondFragment : Fragment() {
             Log.d(TAG, "📤 PING enviado al servidor")
         }
 
+        @RequiresApi(Build.VERSION_CODES.O)
         override fun onMessage(webSocket: WebSocket, text: String) {
             Log.d(TAG, "📨 WebSocket message received: ${text.take(100)}...")
 
@@ -1451,65 +1836,39 @@ class SecondFragment : Fragment() {
     }
 
     private fun logout() {
-        // Limpiar todo
         shouldReconnect.set(false)
         cancelStatusCheck()
         cancelReconnect()
+        handler.removeCallbacksAndMessages(null)
+        webSocket?.close(1000, "Fragment destruido")
+        webSocket = null
 
         sharedPreferences.edit {
             remove("jwt_token")
             remove("user_email")
+            remove(DEVICE_ID_PREF)
+            remove(DEVICE_NAME_PREF)
+            remove(DEVICE_UNIQUE_ID_PREF)
+            remove(PREF_SAFEZONE_LAT)
+            remove(PREF_SAFEZONE_LON)
             apply()
         }
 
         findNavController().navigate(R.id.action_SecondFragment_to_FirstFragment)
-        Log.d(TAG, "Usuario cerró sesión")
+        Log.d(TAG, "Usuario cerró sesión y preferencias limpiadas")
     }
 
+    // REEMPLAZAR handleUnauthorizedError POR ESTA VERSIÓN
     private fun handleUnauthorizedError() {
-        sharedPreferences.edit {
-            remove("jwt_token")
-            remove("user_email")
-        }
-        findNavController().navigate(R.id.action_SecondFragment_to_FirstFragment)
-        showSnackbar("Sesión expirada. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
+        Log.d(TAG, "🔄 Handling unauthorized error - attempting token refresh")
+
+        // ✅ SOLO INTENTAR REFRESH - NO ELIMINAR NADA AÚN
+        refreshJWTToken()
     }
-    @SuppressLint("MissingPermission")
-    private fun centerOnMyLocation() {
-        if (!hasLocationPermission()) {
-            showSnackbar("⚠️ Se necesitan permisos de ubicación", Snackbar.LENGTH_SHORT)
-            return
-        }
-
-        myLocationOverlay?.myLocation?.let { location ->
-            val myPosition = GeoPoint(location.latitude, location.longitude)
-
-            // ===== CENTRADO SUAVE SIN INTERFERIR NAVEGACIÓN FUTURA =====
-            map?.controller?.animateTo(myPosition, 18.0, 1200L)
-
-            showSnackbar("📍 Centrado en tu ubicación", Snackbar.LENGTH_SHORT)
-            Log.d(TAG, "📍 Manually centered on user location")
-
-        } ?: run {
-            showSnackbar("⚠️ Ubicación no disponible", Snackbar.LENGTH_SHORT)
-            Log.w(TAG, "⚠️ User location not available for centering")
-        }
-    }
-    // ============ CENTRADO EN VEHÍCULO CORREGIDO ============
-    private fun centerOnVehicle() {
-        vehicleMarker.get()?.position?.let { vehiclePosition ->
-            map?.controller?.animateTo(vehiclePosition, 18.0, 1200L)
-            showSnackbar("🚗 Centrado en el vehículo", Snackbar.LENGTH_SHORT)
-            Log.d(TAG, "🚗 Manually centered on vehicle")
-        } ?: run {
-            showSnackbar("⚠️ Posición del vehículo no disponible", Snackbar.LENGTH_SHORT)
-            Log.w(TAG, "⚠️ Vehicle position not available for centering")
-        }
-    }
-
 
     // ============ LIFECYCLE OPTIMIZADO ============
 
+    @RequiresApi(Build.VERSION_CODES.O)
     override fun onResume() {
         super.onResume()
 
@@ -1562,8 +1921,12 @@ class SecondFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
 
-        // Limpieza completa
+        // Limpieza completa incluyendo nuevas variables
         shouldReconnect.set(false)
+        isFollowingVehicle.set(false)
+        safeZoneCenter = null
+        currentVehicleState = VehicleState.NORMAL
+
         cancelStatusCheck()
         cancelReconnect()
         handler.removeCallbacksAndMessages(null)

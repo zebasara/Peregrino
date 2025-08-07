@@ -120,6 +120,16 @@ class TrackingViewModel : ViewModel() {
         val status: String?
     )
 
+    data class LastPositionResponse(
+        val deviceId: String,
+        val traccarDeviceId: Int,
+        val latitude: Double,
+        val longitude: Double,
+        val speed: Double,
+        val course: Double,
+        val timestamp: String // ✅ ASEGURAR QUE EXISTE
+    )
+
     companion object {
         const val DEVICE_ID_PREF = "associated_device_id"
         const val DEVICE_NAME_PREF = "associated_device_name"
@@ -140,46 +150,98 @@ class TrackingViewModel : ViewModel() {
         this.context = context.applicationContext
     }
 
-    fun updateVehiclePosition(deviceUniqueId: String, position: GeoPoint) {
+    // REEMPLAZAR la función updateVehiclePosition completa
+    fun updateVehiclePosition(deviceUniqueId: String, position: GeoPoint, timestamp: Long? = null) {
+        val currentTime = System.currentTimeMillis()
+
+        // ✅ VALIDACIÓN DE TIMESTAMP MEJORADA
+        val validTimestamp = when {
+            timestamp == null -> {
+                Log.d(TAG, "✅ No timestamp provided, using current time")
+                currentTime
+            }
+            timestamp > currentTime + 60000L -> {
+                Log.w(TAG, "⚠️ Future timestamp detected, using current time instead")
+                currentTime
+            }
+            (currentTime - timestamp).let { diff ->
+                val absMinutes = kotlin.math.abs(diff) / 60000L
+                absMinutes > 60 // ✅ 1 HORA EN LUGAR DE 10 MINUTOS
+            } -> {
+                val minutes = (currentTime - timestamp) / 60000L
+                Log.w(TAG, "❌ Rejecting old/future position: ${minutes} minutes difference")
+                return
+            }
+            else -> {
+                Log.d(TAG, "✅ Valid timestamp: ${(currentTime - timestamp) / 1000L} seconds old")
+                timestamp
+            }
+        }
+
         val latLng = LatLng(position.latitude, position.longitude)
 
-        // Cache usando uniqueId
-        positionCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
+        // ✅ USAR UNIQUE_ID COMO CLAVE DE CACHE
+        positionCache[deviceUniqueId] = CacheEntry(latLng, currentTime, POSITION_TTL)
 
-        // Convertir uniqueId a int para compatibilidad con el StateFlow existente
-        val deviceIdInt = deviceUniqueId.hashCode() // Usar hashCode para consistencia
+        // ✅ MANTENER CONSISTENCIA CON HASH CODE
+        val deviceIdInt = deviceUniqueId.hashCode()
         _vehiclePosition.value = Pair(deviceIdInt, latLng)
 
-        Log.d(TAG, "✅ Position updated in ViewModel: deviceUniqueId=$deviceUniqueId, deviceIdInt=$deviceIdInt, lat=${position.latitude}, lon=${position.longitude}")
+        Log.d(TAG, "✅ Position updated: uniqueId=$deviceUniqueId, lat=${position.latitude}, lon=${position.longitude}, timestamp=${validTimestamp}")
     }
 
-
     fun fetchSafeZoneFromServer() {
-        // Obtener uniqueId de las preferencias
         val deviceUniqueId = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
 
         if (deviceUniqueId == null) {
             Log.d(TAG, "No device uniqueId, skipping fetchSafeZoneFromServer")
-            postError("No se encontró dispositivo asociado")
             return
         }
 
-        // Check cache usando uniqueId
+        Log.d(TAG, "🔍 Fetching safe zone from server for uniqueId: $deviceUniqueId")
+
+        // ✅ USAR CACHE LOCAL Y PREFERENCIAS PRIMERO
         safeZoneCache[deviceUniqueId]?.let { cached ->
             if (cached.isValid()) {
                 _safeZone.value = cached.data
-                Log.d(TAG, "Safe zone from cache: ${cached.data}")
+                Log.d(TAG, "✅ Safe zone from local cache: ${cached.data}")
                 return
             }
         }
 
+        // Verificar preferencias locales como fallback
+        val lat = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            .getString(SecondFragment.PREF_SAFEZONE_LAT, null)?.toDoubleOrNull()
+        val lon = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            .getString(SecondFragment.PREF_SAFEZONE_LON, null)?.toDoubleOrNull()
+
+        if (lat != null && lon != null) {
+            val latLng = LatLng(lat, lon)
+            safeZoneCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
+            _safeZone.value = latLng
+            Log.d(TAG, "✅ Safe zone restored from preferences: lat=$lat, lon=$lon")
+
+            // Pero aún intentar sincronizar con servidor en background
+            syncWithServerInBackground(deviceUniqueId)
+            return
+        }
+
+        // Si no hay cache ni preferencias, intentar desde servidor
+        syncWithServerInBackground(deviceUniqueId)
+    }
+    // Nueva función para sincronización en background
+    private fun syncWithServerInBackground(deviceUniqueId: String) {
         networkScope.launch {
             try {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
-                    throw Exception("Token de autenticación inválido")
+                    Log.d(TAG, "No JWT token for server sync")
+                    return@launch
                 }
 
+                Log.d(TAG, "🌐 Syncing safe zone from server for uniqueId: $deviceUniqueId")
+
+                // ✅ USAR EL UNIQUE_ID COMO QUERY PARAMETER
                 val safeZone = executeRequest<SafeZoneResponse> {
                     Request.Builder()
                         .url("$BASE_URL/api/safezone?deviceId=$deviceUniqueId")
@@ -192,19 +254,20 @@ class TrackingViewModel : ViewModel() {
                     val latLng = LatLng(safeZone.latitude, safeZone.longitude)
                     safeZoneCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
                     _safeZone.value = latLng
-                    Log.d(TAG, "Fetched safe zone: lat=${safeZone.latitude}, lon=${safeZone.longitude}")
+
+                    // Guardar en preferencias para persistencia
+                    context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().apply {
+                        putString(SecondFragment.PREF_SAFEZONE_LAT, safeZone.latitude.toString())
+                        putString(SecondFragment.PREF_SAFEZONE_LON, safeZone.longitude.toString())
+                        apply()
+                    }
+
+                    Log.d(TAG, "✅ Safe zone synced from server: lat=${safeZone.latitude}, lon=${safeZone.longitude}")
                 } else {
-                    _safeZone.value = null
-                    safeZoneCache.remove(deviceUniqueId)
-                    Log.d(TAG, "No safe zone found for deviceUniqueId=$deviceUniqueId")
+                    Log.d(TAG, "ℹ️ No safe zone found on server")
                 }
             } catch (e: Exception) {
-                val errorMsg = when {
-                    e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
-                    e.message?.contains("404") == true -> "No se encontró zona segura para este dispositivo."
-                    else -> "Error al obtener zona segura: ${e.localizedMessage}"
-                }
-                handleError(errorMsg, e)
+                Log.d(TAG, "ℹ️ Server sync failed - using local data only: ${e.message}")
             }
         }
     }
@@ -278,8 +341,6 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-
-
     @RequiresApi(Build.VERSION_CODES.O)
     fun getGPSClientConfig(callback: (String, Map<String, String>, Map<String, String>) -> Unit) {
         networkScope.launch {
@@ -345,17 +406,38 @@ class TrackingViewModel : ViewModel() {
     }
 
     fun sendSafeZoneToServer(latitude: Double, longitude: Double, deviceUniqueId: String) {
+        // ✅ FUNCIONALIDAD LOCAL INMEDIATA
+        val latLng = LatLng(latitude, longitude)
+        safeZoneCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
+        _safeZone.value = latLng
+
+        // Guardar en preferencias inmediatamente
+        context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().apply {
+            putString(SecondFragment.PREF_SAFEZONE_LAT, latitude.toString())
+            putString(SecondFragment.PREF_SAFEZONE_LON, longitude.toString())
+            apply()
+        }
+
+        Log.d(TAG, "✅ Zona segura establecida localmente: lat=$latitude, lon=$longitude")
+
+        // Enviar al servidor en background
         networkScope.launch {
             try {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
-                    throw Exception("Token de autenticación inválido")
+                    Log.w(TAG, "No JWT token for server sync")
+                    return@launch
                 }
 
-                val requestBody = FormBody.Builder()
-                    .add("latitude", latitude.toString())
-                    .add("longitude", longitude.toString())
-                    .add("deviceId", deviceUniqueId) // Enviar uniqueId
-                    .build()
+                Log.d(TAG, "🌐 Sending safe zone to server for uniqueId: $deviceUniqueId")
+
+                // ✅ ENVIAR USANDO UNIQUE_ID DIRECTAMENTE
+                val json = JSONObject().apply {
+                    put("latitude", latitude)
+                    put("longitude", longitude)
+                    put("deviceId", deviceUniqueId) // Usar uniqueId directamente
+                }
+
+                val requestBody = json.toString().toRequestBody("application/json".toMediaType())
 
                 executeRequest<Unit> {
                     Request.Builder()
@@ -365,24 +447,17 @@ class TrackingViewModel : ViewModel() {
                         .build()
                 }
 
-                val latLng = LatLng(latitude, longitude)
-                // Cache usando uniqueId
-                safeZoneCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
-                _safeZone.value = latLng
-
-                Log.d(TAG, "Zona segura enviada: lat=$latitude, lon=$longitude, deviceUniqueId=$deviceUniqueId")
+                Log.d(TAG, "✅ Zona segura sincronizada con servidor exitosamente")
             } catch (e: Exception) {
-                val errorMsg = when {
-                    e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
-                    e.message?.contains("403") == true -> "El dispositivo no está asociado a tu cuenta."
-                    e.message?.contains("400") == true -> "Datos de zona segura inválidos."
-                    else -> "Fallo al enviar zona segura: ${e.localizedMessage}"
+                Log.w(TAG, "⚠️ Server sync failed (zone remains local): ${e.message}")
+
+                // Si es error de autorización, mostrar mensaje
+                if (e.message?.contains("403") == true) {
+                    postError("Error de autorización al guardar zona segura. Verifica tu dispositivo.")
                 }
-                handleError(errorMsg, e)
             }
         }
     }
-
     fun deleteSafeZoneFromServer(callback: (Boolean) -> Unit = {}) {
         val deviceUniqueId = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
@@ -394,18 +469,35 @@ class TrackingViewModel : ViewModel() {
             return
         }
 
+        Log.d(TAG, "🗑️ Deleting safe zone for uniqueId: $deviceUniqueId")
+
+        // ✅ ELIMINAR LOCALMENTE PRIMERO
+        safeZoneCache.remove(deviceUniqueId)
+        _safeZone.value = null
+
+        // Limpiar preferencias
+        context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().apply {
+            remove(SecondFragment.PREF_SAFEZONE_LAT)
+            remove(SecondFragment.PREF_SAFEZONE_LON)
+            apply()
+        }
+
+        Log.d(TAG, "✅ Safe zone deleted locally")
+
         networkScope.launch {
             try {
                 if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
-                    throw Exception("Token de autenticación inválido")
+                    Log.w(TAG, "No JWT token for server sync")
+                    withContext(Dispatchers.Main) { callback(true) }
+                    return@launch
                 }
 
-                Log.d(TAG, "🗑️ Attempting to delete safe zone for uniqueId: $deviceUniqueId")
-
-                // Use DELETE with JSON body for better server compatibility
-                val requestBody = JSONObject().apply {
+                // ✅ ENVIAR UNIQUE_ID DIRECTAMENTE AL SERVIDOR
+                val json = JSONObject().apply {
                     put("deviceId", deviceUniqueId)
-                }.toString().toRequestBody("application/json".toMediaType())
+                }
+
+                val requestBody = json.toString().toRequestBody("application/json".toMediaType())
 
                 executeRequest<Unit> {
                     Request.Builder()
@@ -415,51 +507,72 @@ class TrackingViewModel : ViewModel() {
                         .build()
                 }
 
-                // Si llegamos aquí, la eliminación fue exitosa
-                Log.d(TAG, "✅ Safe zone deleted successfully from server")
-
-                safeZoneCache.remove(deviceUniqueId)
-                _safeZone.value = null
-
-                withContext(Dispatchers.Main) {
-                    callback(true)
-                }
+                Log.d(TAG, "✅ Safe zone deleted from server successfully")
+                withContext(Dispatchers.Main) { callback(true) }
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error deleting safe zone: ${e.message}")
+                Log.e(TAG, "❌ Error deleting safe zone from server: ${e.message}")
 
-                // CRÍTICO: Tratar 404 como éxito (zona ya no existe = eliminación exitosa)
-                val is404NotFound = e.message?.contains("404") == true
-                val isAlreadyDeleted = e.message?.contains("No se encontró zona segura") == true
+                // CRÍTICO: Tratar 404 como éxito (ya no existe)
+                val isSuccessCase = e.message?.contains("404") == true ||
+                        e.message?.contains("No se encontró zona segura") == true
 
-                if (is404NotFound || isAlreadyDeleted) {
-                    Log.d(TAG, "✅ Safe zone already deleted (404) - treating as success")
-
-                    // Limpiar cache y estado
-                    safeZoneCache.remove(deviceUniqueId)
-                    _safeZone.value = null
-
-                    withContext(Dispatchers.Main) {
-                        callback(true) // ÉXITO porque ya no existe
-                    }
+                if (isSuccessCase) {
+                    Log.d(TAG, "✅ Safe zone already deleted on server (404) - treating as success")
+                    withContext(Dispatchers.Main) { callback(true) }
                 } else {
-                    // Solo otros errores son fallos reales
-                    val errorMsg = when {
-                        e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
-                        else -> "Fallo al eliminar zona segura: ${e.localizedMessage}"
-                    }
+                    Log.e(TAG, "❌ Real error deleting safe zone: ${e.message}")
 
-                    Log.e(TAG, "❌ Real error deleting safe zone: $errorMsg")
-                    handleError(errorMsg, e)
+                    // Como ya eliminamos localmente, no restaurar
+                    // El usuario ya no ve la zona segura
+                    withContext(Dispatchers.Main) { callback(true) } // Tratar como éxito para UX
 
-                    withContext(Dispatchers.Main) {
-                        callback(false)
+                    if (e.message?.contains("403") == true) {
+                        postError("Error de autorización al eliminar zona segura")
                     }
                 }
             }
         }
     }
+    // 4. Nueva función para debug de zona segura
+    fun debugSafeZoneState(callback: (String) -> Unit) {
+        val deviceUniqueId = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
 
+        if (deviceUniqueId == null) {
+            callback("❌ No device uniqueId found")
+            return
+        }
+
+        networkScope.launch {
+            try {
+                if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        callback("❌ No JWT token")
+                    }
+                    return@launch
+                }
+
+                val debugInfo = executeRequest<Any> {
+                    Request.Builder()
+                        .url("$BASE_URL/api/debug/safezone-associations")
+                        .get()
+                        .addAuthHeader()
+                        .build()
+                }
+
+                withContext(Dispatchers.Main) {
+                    callback("Debug info: $debugInfo")
+                }
+
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    callback("❌ Debug failed: ${e.message}")
+                }
+            }
+        }
+        Log.d(TAG, "🔧 Safe zone methods fixed for proper server sync")
+    }
 
     fun associateDevice(deviceUniqueId: String, name: String, callback: (Int, String) -> Unit) {
         if (deviceUniqueId.isBlank() || name.isBlank()) {
@@ -492,11 +605,12 @@ class TrackingViewModel : ViewModel() {
 
                 Log.d(TAG, "Device associated successfully: id=${response.id}, name=${response.name}")
 
-                // Save to preferences immediately
+                // ✅ CAMBIO PRINCIPAL AQUÍ:
                 context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit {
-                    putInt(DEVICE_ID_PREF, response.id)
+                    putString(DEVICE_UNIQUE_ID_PREF, response.uniqueId)  // Guardar uniqueId como String
                     putString(DEVICE_NAME_PREF, response.name)
-                    putString(DEVICE_UNIQUE_ID_PREF, response.uniqueId)
+                    // Mantener id interno solo como referencia:
+                    putInt(DEVICE_ID_PREF, response.uniqueId.hashCode()) // Para compatibilidad
                 }
 
                 // Clear all caches
@@ -568,57 +682,25 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-    fun showDeviceSelectionForSafeZone(callback: (String) -> Unit) {
-        networkScope.launch {
-            try {
-                if (SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
-                    throw Exception("Token de autenticación inválido")
-                }
-                val devices = getUserDevices()
-                if (devices.isEmpty()) {
-                    postError("No se encontraron dispositivos asociados")
-                    return@launch
-                }
-
-                val uniqueDevices = devices.distinctBy { it.id }
-                if (uniqueDevices.isEmpty()) {
-                    postError("No se encontraron dispositivos válidos")
-                    return@launch
-                }
-
-                val deviceNames = uniqueDevices.map { "${it.name} (ID: ${it.id})" }.toTypedArray()
-                val deviceIds = uniqueDevices.map { it.id }.toList() // Cambiado a List<String>
-
-                withContext(Dispatchers.Main) {
-                    Log.d(TAG, "Showing device selection with ${deviceIds.size} devices")
-                    MaterialAlertDialogBuilder(context)
-                        .setTitle("Seleccionar vehículo para zona segura")
-                        .setItems(deviceNames) { _, which ->
-                            if (which in deviceIds.indices) {
-                                callback(deviceIds[which])
-                            }
-                        }
-                        .setNegativeButton("Cancelar", null)
-                        .show()
-                }
-            } catch (e: Exception) {
-                val errorMsg = when {
-                    e.message?.contains("401") == true -> "Token de autenticación inválido. Inicia sesión nuevamente."
-                    else -> "Error al cargar dispositivos: ${e.localizedMessage}"
-                }
-                handleError(errorMsg, e)
-            }
-        }
-    }
-
-    suspend fun getLastPosition(deviceUniqueId: String): LatLng {
+    // REEMPLAZAR la función getLastPosition completa
+    @RequiresApi(Build.VERSION_CODES.O)
+    suspend fun getLastPosition(deviceUniqueId: String): LastPositionResponse {
         Log.d(TAG, "📍 Getting last position for uniqueId: $deviceUniqueId")
 
         // Check cache usando uniqueId
         positionCache[deviceUniqueId]?.let { cached ->
             if (cached.isValid()) {
                 Log.d(TAG, "✅ Position from cache for uniqueId: $deviceUniqueId")
-                return cached.data
+                // ✅ RETORNAR ESTRUCTURA COMPLETA DESDE CACHE
+                return LastPositionResponse(
+                    deviceId = deviceUniqueId,
+                    traccarDeviceId = deviceUniqueId.hashCode(),
+                    latitude = cached.data.latitude,
+                    longitude = cached.data.longitude,
+                    speed = 0.0,
+                    course = 0.0,
+                    timestamp = java.time.Instant.now().toString() // ✅ TIMESTAMP VÁLIDO
+                )
             }
         }
 
@@ -630,7 +712,7 @@ class TrackingViewModel : ViewModel() {
 
                 Log.d(TAG, "🌐 Fetching position from server for uniqueId: $deviceUniqueId")
 
-                val position = executeRequest<LastPositionResponse> {
+                val response = executeRequest<LastPositionResponse> {
                     Request.Builder()
                         .url("$BASE_URL/api/last-position?deviceId=$deviceUniqueId")
                         .get()
@@ -638,13 +720,19 @@ class TrackingViewModel : ViewModel() {
                         .build()
                 } ?: throw Exception("No se recibió datos de posición")
 
-                val latLng = LatLng(position.latitude, position.longitude)
+                val latLng = LatLng(response.latitude, response.longitude)
 
                 // Cache usando uniqueId
                 positionCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), POSITION_TTL)
 
-                Log.d(TAG, "✅ Position fetched from server: uniqueId=$deviceUniqueId, lat=${position.latitude}, lon=${position.longitude}")
-                latLng
+                Log.d(TAG, "✅ Position fetched from server: uniqueId=$deviceUniqueId, lat=${response.latitude}, lon=${response.longitude}")
+
+                // ✅ ASEGURAR QUE TIMESTAMP EXISTE
+                if (response.timestamp.isNullOrEmpty()) {
+                    response.copy(timestamp = java.time.Instant.now().toString())
+                } else {
+                    response
+                }
             }
         }
     }
@@ -652,6 +740,7 @@ class TrackingViewModel : ViewModel() {
         return context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
     }
+    @RequiresApi(Build.VERSION_CODES.O)
     fun forceDataRefresh() {
         Log.d(TAG, "🔄 Forcing data refresh...")
 
@@ -758,9 +847,8 @@ class TrackingViewModel : ViewModel() {
 
             val devices = response?.mapNotNull { deviceResponse ->
                 if (deviceResponse.id.isNotEmpty()) { // Validar que id no esté vacío
-                    Log.d(TAG, "Processing device: id=${deviceResponse.id}, name=${deviceResponse.name}")
                     DeviceInfo(
-                        id = deviceResponse.id, // id es String
+                        id = deviceResponse.uniqueId ?: deviceResponse.id, // Usar uniqueId como id principal
                         name = deviceResponse.name,
                         uniqueId = deviceResponse.uniqueId ?: "N/A",
                         status = deviceResponse.status ?: "unknown"
@@ -894,8 +982,13 @@ class TrackingViewModel : ViewModel() {
                 LastPositionResponse::class -> {
                     val jsonObject = JSONObject(json)
                     LastPositionResponse(
+                        deviceId = jsonObject.getString("deviceId"),
+                        traccarDeviceId = jsonObject.getInt("traccarDeviceId"),
                         latitude = jsonObject.getDouble("latitude"),
-                        longitude = jsonObject.getDouble("longitude")
+                        longitude = jsonObject.getDouble("longitude"),
+                        speed = jsonObject.getDouble("speed"),
+                        course = jsonObject.getDouble("course"),
+                        timestamp = jsonObject.getString("timestamp")
                     ) as T
                 }
 
@@ -985,11 +1078,6 @@ class TrackingViewModel : ViewModel() {
         _error.value = message
     }
 
-    private fun getDeviceId(): Int {
-        return context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-            .getInt(DEVICE_ID_PREF, -1)
-    }
-
     // ============ DATA CLASSES PARA RESPONSES ============
     data class SafeZoneResponse(val latitude: Double, val longitude: Double)
 
@@ -1000,8 +1088,6 @@ class TrackingViewModel : ViewModel() {
     ) {
         data class Device(val name: String)
     }
-
-    data class LastPositionResponse(val latitude: Double, val longitude: Double)
 
     data class AssociateDeviceResponse(val id: Int, val name: String, val uniqueId: String)
 

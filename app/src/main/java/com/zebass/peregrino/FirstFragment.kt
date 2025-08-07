@@ -32,15 +32,17 @@ class FirstFragment : Fragment() {
         return binding.root
     }
 
+    // REEMPLAZAR la parte de verificación de login en onViewCreated:
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        // Verificar si ya hay un usuario logueado
-        if (sharedPreferences.getString("jwt_token", null) != null) {
-            navigateToSecondFragment(
-                sharedPreferences.getString("jwt_token", "")!!,
-                sharedPreferences.getString("user_email", "")!!
-            )
+        // ✅ VERIFICAR SI YA HAY UN USUARIO LOGUEADO (INCLUYENDO PASSWORD)
+        val savedToken = sharedPreferences.getString("jwt_token", null)
+        val savedEmail = sharedPreferences.getString("user_email", null)
+        val savedPassword = sharedPreferences.getString("user_password", null)
+
+        if (savedToken != null && savedEmail != null && savedPassword != null) {
+            navigateToSecondFragment(savedToken, savedEmail)
         }
 
         binding.buttonLogin.setOnClickListener {
@@ -63,7 +65,6 @@ class FirstFragment : Fragment() {
             }
         }
     }
-
     private fun register(email: String, password: String) {
         val json = JSONObject().apply {
             put("email", email)
@@ -95,10 +96,11 @@ class FirstFragment : Fragment() {
                         val jsonResponse = bodyString?.let { JSONObject(it) }
                         val token = jsonResponse?.getString("token") ?: ""
 
-                        // Guardar datos del usuario
+                        // ✅ GUARDAR TAMBIÉN EL PASSWORD
                         with(sharedPreferences.edit()) {
                             putString("jwt_token", token)
                             putString("user_email", email)
+                            putString("user_password", password) // ✅ AGREGAR ESTA LÍNEA
                             apply()
                         }
 
@@ -151,10 +153,11 @@ class FirstFragment : Fragment() {
                         val jsonResponse = bodyString?.let { JSONObject(it) }
                         val token = jsonResponse?.getString("token") ?: ""
 
-                        // Guardar datos del usuario
+                        // ✅ GUARDAR TAMBIÉN EL PASSWORD
                         with(sharedPreferences.edit()) {
                             putString("jwt_token", token)
                             putString("user_email", email)
+                            putString("user_password", password) // ✅ AGREGAR ESTA LÍNEA
                             apply()
                         }
 
@@ -176,7 +179,6 @@ class FirstFragment : Fragment() {
             }
         })
     }
-
     private fun navigateToSecondFragment(token: String, email: String) {
         // Verificar que no estamos ya en el SecondFragment
         if (findNavController().currentDestination?.id != R.id.SecondFragment) {

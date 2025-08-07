@@ -1,90 +1,25 @@
-<?xml version="1.0" encoding="utf-8"?>
-<androidx.coordinatorlayout.widget.CoordinatorLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F5F5">
+    android:background="@android:color/white">
 
-    <!-- AppBar with user information -->
-    <com.google.android.material.appbar.AppBarLayout
-        android:id="@+id/appBarLayout"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:elevation="4dp"
-        app:liftOnScroll="true">
-
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:cardElevation="0dp"
-            app:cardBackgroundColor="@color/colorPrimary">
-
-            <androidx.constraintlayout.widget.ConstraintLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:padding="16dp">
-
-                <com.google.android.material.imageview.ShapeableImageView
-                    android:id="@+id/imageUser"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
-                    android:background="@color/white"
-                    android:padding="12dp"
-                    android:src="@drawable/ic_person"
-                    app:shapeAppearanceOverlay="@style/CircleImageView"
-                    app:layout_constraintStart_toStartOf="parent"
-                    app:layout_constraintTop_toTopOf="parent"
-                    app:layout_constraintBottom_toBottomOf="parent" />
-                <TextView
-                    android:id="@+id/textUser"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:text="Welcome"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:textStyle="bold"
-                    android:layout_marginStart="16dp"
-                    app:layout_constraintStart_toEndOf="@id/imageUser"
-                    app:layout_constraintTop_toTopOf="parent"
-                    app:layout_constraintEnd_toStartOf="@id/buttonLogout" />
-
-                <TextView
-                    android:id="@+id/textUserEmail"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:textColor="@color/white_70"
-                    android:textSize="14sp"
-                    android:layout_marginStart="16dp"
-                    app:layout_constraintStart_toEndOf="@id/imageUser"
-                    app:layout_constraintTop_toBottomOf="@id/textUser"
-                    app:layout_constraintEnd_toStartOf="@id/buttonLogout" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/buttonLogout"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:text="Logout"
-                    android:textSize="12sp"
-                    app:icon="@drawable/ic_logout"
-                    app:iconSize="16dp"
-                    app:cornerRadius="18dp"
-                    android:backgroundTint="@color/white_20"
-                    app:layout_constraintEnd_toEndOf="parent"
-                    app:layout_constraintTop_toTopOf="parent"
-                    app:layout_constraintBottom_toBottomOf="parent"
-                    style="@style/Widget.MaterialComponents.Button" />
-
-            </androidx.constraintlayout.widget.ConstraintLayout>
-        </com.google.android.material.card.MaterialCardView>
-    </com.google.android.material.appbar.AppBarLayout>
-
-    <!-- Main content -->
-    <androidx.core.widget.NestedScrollView
+    <!-- Mapa principal -->
+    <org.osmdroid.views.MapView
+        android:id="@+id/mapView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:fillViewport="true"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior">
+        android:layout_marginBottom="?attr/actionBarSize"
+        android:background="@android:color/white" />
+
+    <!-- Panel de información superior -->
+    <androidx.cardview.widget.CardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="8dp"
+        android:alpha="0.95">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -92,398 +27,183 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <!-- Map Card -->
-            <com.google.android.material.card.MaterialCardView
+            <TextView
+                android:id="@+id/textUser"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                app:cardCornerRadius="16dp"
-                app:cardElevation="8dp">
+                android:text="Usuario"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="@color/black"
+                android:drawableStart="@android:drawable/ic_menu_myplaces"
+                android:drawableTint="@color/green"
+                android:drawablePadding="8dp"
+                android:gravity="center_vertical" />
 
-                <FrameLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="320dp">
-
-                    <org.osmdroid.views.MapView
-                        android:id="@+id/mapView"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent" />
-
-                    <!-- Device Info Overlay -->
-                    <com.google.android.material.card.MaterialCardView
-                        android:id="@+id/cardDeviceInfo"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="top|start"
-                        android:layout_margin="12dp"
-                        app:cardCornerRadius="8dp"
-                        app:cardElevation="4dp"
-                        app:cardBackgroundColor="@color/white_95">
-
-                        <LinearLayout
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:orientation="horizontal"
-                            android:padding="8dp"
-                            android:gravity="center_vertical">
-
-                            <ImageView
-                                android:id="@+id/imageDeviceStatus"
-                                android:layout_width="16dp"
-                                android:layout_height="16dp"
-                                android:src="@drawable/ic_circle"
-                                app:tint="@color/gray" />
-
-                            <TextView
-                                android:id="@+id/textDeviceInfo"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="No device"
-                                android:textSize="12sp"
-                                android:textColor="@color/text_primary"
-                                android:layout_marginStart="8dp" />
-                        </LinearLayout>
-                    </com.google.android.material.card.MaterialCardView>
-
-                    <!-- Device Status Overlay -->
-                    <com.google.android.material.card.MaterialCardView
-                        android:id="@+id/cardDeviceStatus"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="top|end"
-                        android:layout_margin="12dp"
-                        app:cardCornerRadius="8dp"
-                        app:cardElevation="4dp"
-                        app:cardBackgroundColor="@color/white_95">
-
-                        <TextView
-                            android:id="@+id/textDeviceStatus"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text=""
-                            android:textSize="12sp"
-                            android:textColor="@color/text_primary"
-                            android:visibility="gone"
-                            android:padding="8dp" />
-                    </com.google.android.material.card.MaterialCardView>
-
-                    <!-- My Location FAB -->
-                    <com.google.android.material.floatingactionbutton.FloatingActionButton
-                        android:id="@+id/buttonMyLocation"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="bottom|end"
-                        android:layout_margin="16dp"
-                        android:contentDescription="My location"
-                        app:fabSize="mini"
-                        app:srcCompat="@drawable/ic_my_location"
-                        app:backgroundTint="@color/white"
-                        app:tint="@color/primary" />
-                </FrameLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- Real-time Status Card -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/cardRealtimeStatus"
+            <TextView
+                android:id="@+id/textDeviceInfo"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginHorizontal="16dp"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="4dp"
-                android:visibility="gone">
+                android:layout_marginTop="4dp"
+                android:text="Información del dispositivo"
+                android:textSize="14sp"
+                android:textColor="@android:color/darker_gray"
+                android:drawableStart="@android:drawable/ic_menu_info_details"
+                android:drawablePadding="8dp"
+                android:gravity="center_vertical"
+                android:visibility="gone" />
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Real-time Status"
-                        android:textSize="14sp"
-                        android:textStyle="bold"
-                        android:textColor="@color/text_secondary" />
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:layout_marginTop="12dp">
-
-                        <LinearLayout
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:orientation="vertical"
-                            android:gravity="center">
-
-                            <TextView
-                                android:id="@+id/textSpeed"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="0"
-                                android:textSize="24sp"
-                                android:textStyle="bold"
-                                android:textColor="@color/text_primary" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="km/h"
-                                android:textSize="12sp"
-                                android:textColor="@color/text_secondary" />
-                        </LinearLayout>
-
-                        <View
-                            android:layout_width="1dp"
-                            android:layout_height="match_parent"
-                            android:background="@color/divider" />
-
-                        <LinearLayout
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:orientation="vertical"
-                            android:gravity="center">
-
-                            <TextView
-                                android:id="@+id/textDistance"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="--"
-                                android:textSize="24sp"
-                                android:textStyle="bold"
-                                android:textColor="@color/text_primary" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Distance"
-                                android:textSize="12sp"
-                                android:textColor="@color/text_secondary" />
-                        </LinearLayout>
-
-                        <View
-                            android:layout_width="1dp"
-                            android:layout_height="match_parent"
-                            android:background="@color/divider" />
-
-                        <LinearLayout
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:orientation="vertical"
-                            android:gravity="center">
-
-                            <TextView
-                                android:id="@+id/textLastUpdate"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="--:--"
-                                android:textSize="24sp"
-                                android:textStyle="bold"
-                                android:textColor="@color/text_primary" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Last Update"
-                                android:textSize="12sp"
-                                android:textColor="@color/text_secondary" />
-                        </LinearLayout>
-                    </LinearLayout>
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- Safe Zone Button -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/cardSafeZone"
+            <TextView
+                android:id="@+id/textDeviceStatus"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginHorizontal="16dp"
-                android:layout_marginBottom="8dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="4dp"
-                app:cardBackgroundColor="@color/safe_zone_inactive">
+                android:layout_marginTop="4dp"
+                android:text="Estado del dispositivo"
+                android:textSize="14sp"
+                android:textColor="@android:color/holo_green_dark"
+                android:drawableStart="@drawable/common_full_open_on_phone"
+                android:drawablePadding="8dp"
+                android:gravity="center_vertical"
+                android:visibility="gone" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/buttonZonaSegura"
-                    android:layout_width="match_parent"
-                    android:layout_height="60dp"
-                    android:text="Set Safe Zone"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    app:icon="@drawable/ic_security"
-                    app:iconSize="24dp"
-                    app:iconGravity="textStart"
-                    android:backgroundTint="@android:color/transparent"
-                    android:textColor="@color/white"
-                    style="@style/Widget.MaterialComponents.Button.TextButton" />
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- Quick Actions Grid -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingBottom="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Quick Actions"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    android:textColor="@color/text_primary"
-                    android:layout_marginBottom="12dp" />
-
-                <GridLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:columnCount="2"
-                    android:useDefaultMargins="true">
-
-                    <!-- Associate Vehicle -->
-                    <com.google.android.material.card.MaterialCardView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_columnWeight="1"
-                        app:cardCornerRadius="12dp"
-                        app:cardElevation="2dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:foreground="?android:attr/selectableItemBackground">
-
-                        <LinearLayout
-                            android:id="@+id/buttonAssociateDevice"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical"
-                            android:padding="20dp"
-                            android:gravity="center">
-
-                            <ImageView
-                                android:layout_width="40dp"
-                                android:layout_height="40dp"
-                                android:src="@drawable/ic_add_vehicle"
-                                app:tint="@color/primary" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Add Vehicle"
-                                android:textSize="14sp"
-                                android:textColor="@color/text_primary"
-                                android:layout_marginTop="8dp" />
-                        </LinearLayout>
-                    </com.google.android.material.card.MaterialCardView>
-
-                    <!-- Device Status -->
-                    <com.google.android.material.card.MaterialCardView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_columnWeight="1"
-                        app:cardCornerRadius="12dp"
-                        app:cardElevation="2dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:foreground="?android:attr/selectableItemBackground">
-
-                        <LinearLayout
-                            android:id="@+id/buttonDeviceStatus"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical"
-                            android:padding="20dp"
-                            android:gravity="center">
-
-                            <ImageView
-                                android:layout_width="40dp"
-                                android:layout_height="40dp"
-                                android:src="@drawable/ic_status"
-                                app:tint="@color/primary" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Device Status"
-                                android:textSize="14sp"
-                                android:textColor="@color/text_primary"
-                                android:layout_marginTop="8dp" />
-                        </LinearLayout>
-                    </com.google.android.material.card.MaterialCardView>
-
-                    <!-- GPS Config -->
-                    <com.google.android.material.card.MaterialCardView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_columnWeight="1"
-                        app:cardCornerRadius="12dp"
-                        app:cardElevation="2dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:foreground="?android:attr/selectableItemBackground">
-
-                        <LinearLayout
-                            android:id="@+id/buttonShowConfig"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical"
-                            android:padding="20dp"
-                            android:gravity="center">
-
-                            <ImageView
-                                android:layout_width="40dp"
-                                android:layout_height="40dp"
-                                android:src="@drawable/ic_settings"
-                                app:tint="@color/primary" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="GPS Config"
-                                android:textSize="14sp"
-                                android:textColor="@color/text_primary"
-                                android:layout_marginTop="8dp" />
-                        </LinearLayout>
-                    </com.google.android.material.card.MaterialCardView>
-                </GridLayout>
-            </LinearLayout>
-
-            <!-- Offline Map Components -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/cardOfflineMap"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginHorizontal="16dp"
-                android:layout_marginBottom="8dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="4dp"
-                android:visibility="gone">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/buttonDescargarOffline"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="Download Offline Map"
-                    android:textSize="14sp"
-                    app:icon="@drawable/ic_download"
-                    app:iconSize="20dp"
-                    app:iconGravity="textStart"
-                    android:backgroundTint="@android:color/transparent"
-                    android:textColor="@color/text_primary"
-                    style="@style/Widget.MaterialComponents.Button.TextButton" />
-            </com.google.android.material.card.MaterialCardView>
-
-            <ProgressBar
-                android:id="@+id/progressBarDownload"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginHorizontal="16dp"
-                android:visibility="gone"
-                style="@style/Widget.AppCompat.ProgressBar.Horizontal" />
         </LinearLayout>
-    </androidx.core.widget.NestedScrollView>
+    </androidx.cardview.widget.CardView>
+
+    <!-- Botones flotantes mejorados en el lado derecho -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end|center_vertical"
+        android:layout_marginEnd="16dp"
+        android:orientation="vertical">
+
+        <!-- Botón de seguimiento del vehículo mejorado -->
+        <Button
+            android:id="@+id/buttonMyLocation"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="📍 Ubicación"
+            android:textColor="@android:color/white"
+            android:backgroundTint="@android:color/holo_blue_dark"
+            app:icon="@android:drawable/ic_menu_mylocation"
+            app:iconTint="@android:color/white" />
+
+        <!-- Botón de zona segura -->
+        <Button
+            android:id="@+id/buttonZonaSegura"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:backgroundTint="@android:color/holo_blue_dark"
+            app:icon="@android:drawable/ic_dialog_map"
+            app:tint="@android:color/white" />
+
+        <!-- Botón de estado del dispositivo -->
+        <Button
+            android:id="@+id/buttonDeviceStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:backgroundTint="@android:color/holo_orange_dark"
+            app:icon="@android:drawable/ic_dialog_info"
+            app:tint="@android:color/white" />
+
+    </LinearLayout>
+
+    <!-- Panel inferior con botones principales -->
+    <com.google.android.material.bottomappbar.BottomAppBar
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        app:backgroundTint="@android:color/white"
+        app:elevation="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="8dp">
+
+            <!-- Botón asociar dispositivo -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonAssociateDevice"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="Asociar\nVehículo"
+                android:textSize="12sp"
+                app:backgroundTint="@android:color/holo_green_dark"
+                app:icon="@android:drawable/ic_input_add"
+                app:iconGravity="top"
+                app:cornerRadius="8dp" />
+
+            <!-- Botón zona segura (duplicado para fácil acceso) -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonZonaSeguraMain"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:text="Zona\nSegura"
+                android:textSize="12sp"
+                app:backgroundTint="@android:color/holo_blue_dark"
+                app:icon="@android:drawable/ic_dialog_map"
+                app:iconGravity="top"
+                app:cornerRadius="8dp"
+                android:onClick="@{() -> buttonZonaSegura.performClick()}" />
+
+            <!-- Botón configuración GPS -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonShowConfig"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:text="Config\nGPS"
+                android:textSize="12sp"
+                app:backgroundTint="@android:color/holo_orange_dark"
+                app:icon="@android:drawable/ic_menu_preferences"
+                app:iconGravity="top"
+                app:cornerRadius="8dp" />
+
+            <!-- Botón logout -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonLogout"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="Salir"
+                android:textSize="12sp"
+                app:backgroundTint="@android:color/holo_red_dark"
+                app:icon="@android:drawable/ic_menu_close_clear_cancel"
+                app:iconGravity="top"
+                app:cornerRadius="8dp" />
+
+        </LinearLayout>
+
+    </com.google.android.material.bottomappbar.BottomAppBar>
+
+    <!-- Elementos ocultos (para compatibilidad) -->
+    <ProgressBar
+        android:id="@+id/progressBarDownload"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/buttonDescargarOffline"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:visibility="gone"
+        android:text="Oculto" />
+
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
