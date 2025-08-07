@@ -12,7 +12,7 @@
         android:layout_marginBottom="?attr/actionBarSize"
         android:background="@android:color/white" />
 
-    <!-- Panel de información superior -->
+    <!-- Panel de información superior MEJORADO -->
     <androidx.cardview.widget.CardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -52,6 +52,23 @@
                 android:drawablePadding="8dp"
                 android:gravity="center_vertical"
                 android:visibility="gone" />
+
+            <!-- ✅ NUEVO: TextView para Status del Sistema -->
+            <TextView
+                android:id="@+id/textStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="🔄 Iniciando sistema..."
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:textColor="@android:color/darker_gray"
+                android:drawableStart="@android:drawable/ic_dialog_info"
+                android:drawablePadding="8dp"
+                android:gravity="center_vertical"
+                android:background="@drawable/status_background"
+                android:padding="8dp"
+                android:visibility="visible" />
 
             <TextView
                 android:id="@+id/textDeviceStatus"
@@ -96,9 +113,11 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
             android:layout_gravity="end"
+            android:text="🛡️ Zona"
+            android:textColor="@android:color/white"
             android:backgroundTint="@android:color/holo_blue_dark"
             app:icon="@android:drawable/ic_dialog_map"
-            app:tint="@android:color/white" />
+            app:iconTint="@android:color/white" />
 
         <!-- Botón de estado del dispositivo -->
         <Button
@@ -107,9 +126,11 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
             android:layout_gravity="end"
+            android:text="📊 Estado"
+            android:textColor="@android:color/white"
             android:backgroundTint="@android:color/holo_orange_dark"
             app:icon="@android:drawable/ic_dialog_info"
-            app:tint="@android:color/white" />
+            app:iconTint="@android:color/white" />
 
     </LinearLayout>
 
@@ -154,8 +175,7 @@
                 app:backgroundTint="@android:color/holo_blue_dark"
                 app:icon="@android:drawable/ic_dialog_map"
                 app:iconGravity="top"
-                app:cornerRadius="8dp"
-                android:onClick="@{() -> buttonZonaSegura.performClick()}" />
+                app:cornerRadius="8dp" />
 
             <!-- Botón configuración GPS -->
             <com.google.android.material.button.MaterialButton

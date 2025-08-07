@@ -1,0 +1,10 @@
+<!-- res/drawable/ic_shield_off.xml -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12 5.16,-1.26 9,-6.45 9,-12V5L12,1zm0,16.5l-4.5,-4.5 1.41,-1.41L12,13.67l3.09,-3.09L16.5,12l-4.5,4.5z"/>
+</vector>

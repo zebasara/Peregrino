@@ -2,10 +2,12 @@ package com.zebass.peregrino
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -19,6 +21,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -36,9 +40,12 @@ import androidx.navigation.fragment.navArgs
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.zebass.peregrino.databinding.FragmentSecondBinding
+import com.zebass.peregrino.service.AlertManager
 import com.zebass.peregrino.service.TrackingService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
@@ -140,6 +147,9 @@ class SecondFragment : Fragment() {
     private val safeZoneCache = LocalCache<GeoPoint>(ttl = 120_000L)
     private val lastPositionCache = LocalCache<GeoPoint>(ttl = 5_000L)
 
+    // ----ALARMA-----
+    private lateinit var alertManager: AlertManager
+
     companion object {
         var JWT_TOKEN: String? = ""
         private var safeZone: GeoPoint? = null
@@ -233,11 +243,14 @@ class SecondFragment : Fragment() {
     @SuppressLint("MissingPermission")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // ✅ LIMPIAR CACHES CORRUPTOS AL INICIO
+        clearCorruptedCaches()
+
         // ✅ RESTAURAR DISPOSITIVO INMEDIATAMENTE
         if (!restoreDeviceFromPreferences()) {
-            // Solo mostrar asociar si no hay dispositivo guardado
             updateStatusUI("Asocia un vehículo para comenzar", android.R.color.darker_gray)
         }
+
         val userEmail = args.userEmail
         JWT_TOKEN = args.jwtToken
         Log.d(TAG, "🚀 onViewCreated: userEmail=$userEmail, hasToken=${!JWT_TOKEN.isNullOrEmpty()}")
@@ -276,6 +289,43 @@ class SecondFragment : Fragment() {
                 Log.e(TAG, "❌ Error in onViewCreated", e)
                 showSnackbar("❌ Error de inicialización: ${e.message}", Snackbar.LENGTH_LONG)
             }
+        }
+        alertManager = AlertManager(requireContext())
+    }
+
+    private fun clearCorruptedCaches() {
+        try {
+            // Verificar integridad de datos
+            val prefs = requireContext().getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            val uniqueId = prefs.getString(DEVICE_UNIQUE_ID_PREF, null)
+            val deviceName = prefs.getString(DEVICE_NAME_PREF, null)
+            val jwtToken = prefs.getString("jwt_token", null)
+
+            if (uniqueId != null && deviceName != null && jwtToken != null) {
+                Log.d(TAG, "✅ Cache integrity OK")
+                return
+            }
+
+            if (uniqueId == null || deviceName == null) {
+                Log.w(TAG, "🧹 Incomplete device data detected, forcing refresh")
+
+                // Limpiar todo para evitar estados inconsistentes
+                prefs.edit {
+                    remove(DEVICE_ID_PREF)
+                    remove(DEVICE_NAME_PREF)
+                    remove(DEVICE_UNIQUE_ID_PREF)
+                    remove(PREF_SAFEZONE_LAT)
+                    remove(PREF_SAFEZONE_LON)
+                }
+
+                // Limpiar caches locales
+                deviceInfoCache.clear()
+                safeZoneCache.clear()
+                lastPositionCache.clear()
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking cache integrity: ${e.message}")
         }
     }
 
@@ -1155,20 +1205,24 @@ class SecondFragment : Fragment() {
         return results[0].toDouble()
     }
 
-
     @RequiresApi(Build.VERSION_CODES.O)
     private fun triggerAlarm(deviceId: Int, distance: Double) {
-        val vibrator = requireContext().getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
-        vibrator.vibrate(
-            android.os.VibrationEffect.createOneShot(
-                1000,
-                android.os.VibrationEffect.DEFAULT_AMPLITUDE
-            )
-        )
+        // Vibración rápida como feedback inicial
+        val vibrator = requireContext().getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        vibrator.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
+
+        // Activar alarma crítica con sonido
+        alertManager.startCriticalAlert(deviceId, distance)
+
         showSnackbar(
             "¡ALERTA! El vehículo $deviceId está a ${"%.1f".format(distance)} metros",
             Snackbar.LENGTH_LONG
         )
+    }
+    private fun stopAlarmIfActive() {
+        if (::alertManager.isInitialized) {
+            alertManager.stopAlert()
+        }
     }
 
     private fun updateSafeZoneUI(position: GeoPoint) {
@@ -1246,12 +1300,26 @@ class SecondFragment : Fragment() {
     }
 
     // ============ FUNCIONES DE DISPOSITIVO OPTIMIZADAS ============
-
     private fun updateStatusUI(message: String, colorResId: Int? = null) {
-        // ✅ VERIFICAR QUE BINDING NO SEA NULL
-        if (!isAdded || _binding == null) {
-            Log.w(TAG, "Fragment not attached or binding is null, skipping UI update")
+        // ✅ VERIFICAR QUE BINDING NO SEA NULL Y FRAGMENT ESTÉ ACTIVO
+        if (!isAdded || _binding == null || !isResumed) {
+            Log.w(TAG, "Fragment not ready for UI update, skipping: $message")
             return
+        }
+
+        try {
+            // ✅ USAR EL TextView QUE SÍ EXISTE
+            binding.textDeviceStatus.text = message
+            binding.textDeviceStatus.visibility = View.VISIBLE
+
+            colorResId?.let {
+                binding.textDeviceStatus.setTextColor(
+                    ContextCompat.getColor(requireContext(), it)
+                )
+            }
+            Log.d(TAG, "✅ Status updated: $message")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating status UI: ${e.message}")
         }
     }
     private fun startPeriodicStatusCheck() {
@@ -1297,17 +1365,6 @@ class SecondFragment : Fragment() {
     private fun cancelStatusCheck() {
         statusCheckRunnable?.let { handler.removeCallbacks(it) }
         statusCheckRunnable = null
-    }
-
-    // ============ ZONA SEGURA OPTIMIZADA ============
-
-    @RequiresApi(Build.VERSION_CODES.O)
-    private fun handleSafeZoneButton() {
-        if (safeZone == null) {
-            enterSafeZoneSetupMode()
-        } else {
-            toggleSafeZone()
-        }
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -1865,9 +1922,341 @@ class SecondFragment : Fragment() {
         // ✅ SOLO INTENTAR REFRESH - NO ELIMINAR NADA AÚN
         refreshJWTToken()
     }
+    // ============ ZONA SEGURA OPTIMIZADA ============
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun handleSafeZoneButton() {
+        Log.d(TAG, "🛡️ Botón zona segura presionado - Estado actual: safeZone=${safeZone != null}")
+
+        if (safeZone == null || !isSafeZoneActive()) {
+            // ✅ NO HAY ZONA SEGURA - CREAR NUEVA
+            enterSafeZoneSetupMode()
+        } else {
+            // ✅ HAY ZONA SEGURA ACTIVA - MOSTRAR OPCIONES
+            showSafeZoneOptionsDialog()
+        }
+    }
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun showSafeZoneOptionsDialog() {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("🛡️ Zona Segura Activa")
+            .setMessage("¿Qué quieres hacer con la zona segura actual?")
+            .setPositiveButton("✏️ Reconfigurar Aquí") { _, _ ->
+                // ✅ ESTABLECER NUEVA ZONA EN POSICIÓN ACTUAL DEL VEHÍCULO
+                reconfigureSafeZoneAtVehiclePosition()
+            }
+            .setNeutralButton("📍 Reconfigurar en Mi Ubicación") { _, _ ->
+                // ✅ ESTABLECER NUEVA ZONA EN UBICACIÓN DEL USUARIO
+                reconfigureSafeZoneAtMyLocation()
+            }
+            .setNegativeButton("🗑️ Desactivar Zona") { _, _ ->
+                // ✅ CONFIRMAR ELIMINACIÓN
+                showDeleteSafeZoneConfirmation()
+            }
+            .show()
+    }
+    /**
+     * ✅ RECONFIGURAR ZONA EN POSICIÓN DEL VEHÍCULO
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun reconfigureSafeZoneAtVehiclePosition() {
+        val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
+        if (deviceUniqueId == null) {
+            showSnackbar("❌ No hay dispositivo asociado", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        Log.d(TAG, "🔄 Reconfigurando zona segura en posición del vehículo")
+
+        // ✅ UI FEEDBACK INMEDIATO
+        updateSafeZoneButtonText("🔄 Obteniendo posición del vehículo...")
+        binding.buttonZonaSegura.isEnabled = false
+
+        lifecycleScope.launch {
+            try {
+                val position = viewModel.getLastPosition(deviceUniqueId)
+                val geoPoint = GeoPoint(position.latitude, position.longitude)
+
+                // ✅ CONFIRMAR CON EL USUARIO
+                showConfirmNewSafeZone(geoPoint, "posición del vehículo") { confirmed ->
+                    if (confirmed) {
+                        establishSafeZoneAt(geoPoint, deviceUniqueId)
+                    } else {
+                        restoreSafeZoneButton()
+                    }
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error obteniendo posición del vehículo", e)
+                showSnackbar("❌ Error: ${e.message}", Snackbar.LENGTH_LONG)
+                restoreSafeZoneButton()
+            }
+        }
+    }
+    /**
+     * ✅ RECONFIGURAR ZONA EN UBICACIÓN DEL USUARIO
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    @SuppressLint("MissingPermission")
+    private fun reconfigureSafeZoneAtMyLocation() {
+        if (!hasLocationPermission()) {
+            showSnackbar("❌ Se necesitan permisos de ubicación", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
+        if (deviceUniqueId == null) {
+            showSnackbar("❌ No hay dispositivo asociado", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        Log.d(TAG, "📍 Reconfigurando zona segura en mi ubicación")
+
+        // ✅ UI FEEDBACK
+        updateSafeZoneButtonText("📍 Obteniendo tu ubicación...")
+        binding.buttonZonaSegura.isEnabled = false
+
+        // ✅ OBTENER UBICACIÓN ACTUAL DEL USUARIO
+        fusedLocationClient.lastLocation
+            .addOnSuccessListener { location ->
+                if (location != null) {
+                    val geoPoint = GeoPoint(location.latitude, location.longitude)
+
+                    showConfirmNewSafeZone(geoPoint, "tu ubicación actual") { confirmed ->
+                        if (confirmed) {
+                            establishSafeZoneAt(geoPoint, deviceUniqueId)
+                        } else {
+                            restoreSafeZoneButton()
+                        }
+                    }
+                } else {
+                    showSnackbar("❌ No se pudo obtener tu ubicación", Snackbar.LENGTH_SHORT)
+                    restoreSafeZoneButton()
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "❌ Error obteniendo ubicación del usuario", e)
+                showSnackbar("❌ Error obteniendo ubicación: ${e.message}", Snackbar.LENGTH_SHORT)
+                restoreSafeZoneButton()
+            }
+    }
+    /**
+     * ✅ CONFIRMAR NUEVA ZONA SEGURA CON PREVIEW
+     */
+    private fun showConfirmNewSafeZone(
+        position: GeoPoint,
+        locationDescription: String,
+        callback: (Boolean) -> Unit
+    ) {
+        val distanceFromCurrent = safeZone?.let { current ->
+            calculateAccurateDistance(current, position)
+        } ?: 0.0
+
+        val message = buildString {
+            appendLine("Nueva zona segura en $locationDescription:")
+            appendLine()
+            appendLine("📍 Coordenadas:")
+            appendLine("   Lat: ${String.format("%.6f", position.latitude)}")
+            appendLine("   Lon: ${String.format("%.6f", position.longitude)}")
+
+            if (distanceFromCurrent > 0) {
+                appendLine()
+                appendLine("📏 Distancia de zona actual: ${String.format("%.0f", distanceFromCurrent)}m")
+            }
+
+            appendLine()
+            appendLine("⚠️ Esto reemplazará la zona segura actual.")
+        }
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("🛡️ Confirmar Nueva Zona Segura")
+            .setMessage(message)
+            .setPositiveButton("✅ Sí, Establecer Aquí") { _, _ ->
+                callback(true)
+            }
+            .setNegativeButton("❌ Cancelar") { _, _ ->
+                callback(false)
+            }
+            .setCancelable(false)
+            .show()
+    }
+    /**
+     * ✅ ESTABLECER ZONA SEGURA EN POSICIÓN ESPECÍFICA
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun establishSafeZoneAt(position: GeoPoint, deviceUniqueId: String) {
+        updateSafeZoneButtonText("🔄 Estableciendo zona segura...")
+
+        lifecycleScope.launch {
+            try {
+                // ✅ ENVIAR AL SERVIDOR
+                viewModel.sendSafeZoneToServer(
+                    position.latitude,
+                    position.longitude,
+                    deviceUniqueId
+                )
+
+                // ✅ ACTUALIZAR LOCALMENTE
+                safeZone = position
+                safeZoneCache.set(position)
+                updateSafeZoneUI(position)
+
+                // ✅ GUARDAR EN PREFERENCIAS
+                sharedPreferences.edit {
+                    putString(PREF_SAFEZONE_LAT, position.latitude.toString())
+                    putString(PREF_SAFEZONE_LON, position.longitude.toString())
+                }
+
+                // ✅ CENTRAR MAPA EN NUEVA ZONA (SIN AFECTAR SEGUIMIENTO DE VEHÍCULO)
+                if (!isFollowingVehicle.get()) {
+                    map?.controller?.animateTo(position, 17.0, 1000L)
+                }
+
+                // ✅ CONFIRMACIÓN
+                showSnackbar("✅ Nueva zona segura establecida", Snackbar.LENGTH_LONG)
+                updateSafeZoneButtonText("🛡️ Zona Segura Activa ✓")
+                binding.buttonZonaSegura.isEnabled = true
+
+                Log.d(TAG, "✅ Zona segura reconfigurada: lat=${position.latitude}, lon=${position.longitude}")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error estableciendo nueva zona segura", e)
+                showSnackbar("❌ Error: ${e.message}", Snackbar.LENGTH_LONG)
+                restoreSafeZoneButton()
+            }
+        }
+    }
+
+    /**
+     * ✅ CONFIRMACIÓN DE ELIMINACIÓN MÁS CLARA
+     */
+    private fun showDeleteSafeZoneConfirmation() {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("⚠️ Eliminar Zona Segura")
+            .setMessage("¿Estás COMPLETAMENTE SEGURO de que quieres eliminar la zona segura?\n\n" +
+                    "ESTO SIGNIFICA:\n" +
+                    "• NO habrá más alertas de seguridad\n" +
+                    "• El vehículo podrá moverse libremente sin avisos\n" +
+                    "• Tendrás que configurar una nueva zona manualmente\n\n" +
+                    "⚠️ Solo hazlo si realmente no necesitas el monitoreo.")
+            .setPositiveButton("🗑️ SÍ, ELIMINAR COMPLETAMENTE") { _, _ ->
+                performSafeZoneDeletion()
+            }
+            .setNeutralButton("🔇 SOLO SILENCIAR ALARMAS") { _, _ ->
+                temporarilySilenceAlerts()
+            }
+            .setNegativeButton("❌ Cancelar") { _, _ ->
+                // No hacer nada
+            }
+            .setCancelable(true)
+            .show()
+    }
+
+    /**
+     * ✅ SILENCIAR TEMPORALMENTE (NUEVA OPCIÓN)
+     */
+    private fun temporarilySilenceAlerts() {
+        // ✅ GUARDAR ESTADO DE "SILENCIADO TEMPORALMENTE"
+        sharedPreferences.edit {
+            putLong("alerts_silenced_until", System.currentTimeMillis() + (60 * 60 * 1000)) // 1 hora
+        }
+
+        // ✅ ENVIAR BROADCAST PARA SILENCIAR ALARMAS ACTIVAS
+        val intent = Intent("com.peregrino.SILENCE_ALERTS_TEMPORARILY")
+        requireContext().sendBroadcast(intent)
+
+        showSnackbar("🔇 Alertas silenciadas por 1 hora - Zona segura sigue activa", Snackbar.LENGTH_LONG)
+        updateSafeZoneButtonText("🛡️ Zona Activa (Silenciada 1h)")
+
+        // ✅ RESTAURAR TEXTO DESPUÉS DE 1 HORA
+        handler.postDelayed({
+            if (isAdded) {
+                updateSafeZoneButtonText("🛡️ Zona Segura Activa ✓")
+                showSnackbar("🔔 Alertas de zona segura reactivadas", Snackbar.LENGTH_SHORT)
+            }
+        }, 60 * 60 * 1000)
+    }
+
+    /**
+     * ✅ FUNCIONES AUXILIARES PARA UI
+     */
+    private fun updateSafeZoneButtonText(text: String) {
+        binding.buttonZonaSegura.text = text
+        binding.buttonZonaSeguraMain.text = text
+    }
+
+    private fun restoreSafeZoneButton() {
+        binding.buttonZonaSegura.isEnabled = true
+        binding.buttonZonaSeguraMain.isEnabled = true
+        updateSafeZoneButtonText(
+            if (safeZone != null) "🛡️ Zona Segura Activa ✓"
+            else "🛡️ Establecer Zona Segura"
+        )
+    }
+
+    private fun isSafeZoneActive(): Boolean {
+        // ✅ VERIFICAR SI LA ZONA ESTÁ REALMENTE ACTIVA
+        val hasCoordinates = safeZone != null
+        val hasSavedZone = sharedPreferences.contains(PREF_SAFEZONE_LAT) &&
+                sharedPreferences.contains(PREF_SAFEZONE_LON)
+
+        return hasCoordinates || hasSavedZone
+    }
+
+    // ✅ TAMBIÉN AGREGAR ESTA PROPIEDAD AL INICIO DE LA CLASE
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+
+    // ✅ Y ESTA INICIALIZACIÓN EN onViewCreated() DESPUÉS DE setupMap()
+    private fun initializeFusedLocationClient() {
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(requireActivity())
+    }
+
+// ============ BROADCAST RECEIVER PARA DETECTAR CUANDO SE DESACTIVA LA ZONA ============
+
+    private val safeZoneReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                "com.peregrino.SAFEZONE_DISABLED" -> {
+                    Log.d(TAG, "🛡️ Zona segura desactivada desde servicio")
+
+                    // ✅ ACTUALIZAR UI
+                    safeZone = null
+                    safeZoneCache.clear()
+
+                    // ✅ REMOVER POLÍGONO DEL MAPA
+                    safeZonePolygon.get()?.let {
+                        map?.overlays?.remove(it)
+                    }
+                    safeZonePolygon.set(null)
+
+                    // ✅ ACTUALIZAR BOTÓN
+                    updateSafeZoneButton(false)
+                    updateSafeZoneButtonText("🛡️ Establecer Zona Segura")
+
+                    map?.postInvalidate()
+
+                    // ✅ MOSTRAR CONFIRMACIÓN
+                    showSnackbar("🛡️ Zona segura desactivada desde alarma", Snackbar.LENGTH_LONG)
+                }
+
+                "com.peregrino.SAFEZONE_ALERT" -> {
+                    val distance = intent.getDoubleExtra("distance", 0.0)
+                    Log.w(TAG, "🚨 Alerta recibida desde servicio: ${distance}m")
+
+                    // ✅ MOSTRAR ALERTA EN LA APP (SI ESTÁ ABIERTA)
+                    lifecycleScope.launch(Dispatchers.Main) {
+                        showSnackbar(
+                            "🚨 VEHÍCULO FUERA DE ZONA: ${distance.toInt()}m",
+                            Snackbar.LENGTH_LONG
+                        )
+                    }
+                }
+            }
+        }
+    }
 
     // ============ LIFECYCLE OPTIMIZADO ============
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onResume() {
         super.onResume()
@@ -1878,27 +2267,28 @@ class SecondFragment : Fragment() {
         // ===== CONFIGURACIÓN POST-RESUME =====
         shouldReconnect.set(true)
 
-        if (hasAssociatedDevice()) {
-            lifecycleScope.launch {
-                supervisorScope {
-                    launch {
-                        delay(500)
-                        setupWebSocket()
-                    }
-                    launch {
-                        delay(1000)
-                        startPeriodicStatusCheck()
-                    }
-                    launch {
-                        delay(1500)
-                        if (System.currentTimeMillis() - lastPositionUpdate.get() > 30000L) {
-                            fetchInitialPosition()
-                        }
-                    }
-                }
-            }
+
+        // ✅ REGISTRAR RECEIVER con flag explícito
+        val filter = IntentFilter().apply {
+            addAction("com.peregrino.SAFEZONE_DISABLED")
+            addAction("com.peregrino.SAFEZONE_ALERT")
         }
-        Log.d(TAG, "🔄 Fragment resumed - mapa mantenido fluido")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Para Android 13+ usa RECEIVER_NOT_EXPORTED (recomendado para receivers internos)
+            ContextCompat.registerReceiver(
+                requireContext(),
+                safeZoneReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            // Para versiones anteriores, usa el método tradicional
+            requireContext().registerReceiver(safeZoneReceiver, filter)
+        }
+
+
+        Log.d(TAG, "✅ SafeZone receiver registrado")
     }
 
     override fun onPause() {
@@ -1916,6 +2306,13 @@ class SecondFragment : Fragment() {
         webSocket = null
 
         Log.d(TAG, "⏸️ Fragment pausado - mapa pausado correctamente")
+        // ✅ DESREGISTRAR RECEIVER
+        try {
+            requireContext().unregisterReceiver(safeZoneReceiver)
+            Log.d(TAG, "✅ SafeZone receiver desregistrado")
+        } catch (e: Exception) {
+            Log.w(TAG, "Receiver ya desregistrado: ${e.message}")
+        }
     }
 
     override fun onDestroyView() {
