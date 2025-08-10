@@ -1,7 +1,9 @@
 package com.zebass.peregrino
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +24,7 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var sharedPreferences: SharedPreferences
 
     companion object {
         private const val TAG = "MainActivity"
@@ -31,15 +34,18 @@ class MainActivity : AppCompatActivity() {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
+        Log.d(TAG, "MainActivity created")
+        sharedPreferences = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         checkAndRequestNotificationPermission()
         initializeWorkManager()
         scheduleSyncWork()
+        // ✅ CONFIGURAR NAVEGACIÓN SEGURA
+        setupNavigation()
 
-        Log.d(TAG, "MainActivity created")
+
     }
 
     override fun onRequestPermissionsResult(
@@ -147,6 +153,103 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error programando trabajo de sincronización", e)
             }
+        }
+    }
+    // ✅ CONFIGURAR NAVEGACIÓN
+    private fun setupNavigation() {
+        try {
+            val navController = findNavController(R.id.nav_host_fragment_content_main)
+
+            // ✅ LISTENER PARA CAMBIOS DE DESTINO
+            navController.addOnDestinationChangedListener { _, destination, _ ->
+                Log.d(TAG, "Navigation destination changed to: ${destination.id}")
+
+                when (destination.id) {
+                    R.id.FirstFragment -> {
+                        Log.d(TAG, "Now in FirstFragment (Login)")
+                        // Ocultar action bar si es necesario
+                        supportActionBar?.hide()
+                    }
+                    R.id.SecondFragment -> {
+                        Log.d(TAG, "Now in SecondFragment (Main)")
+                        // Mostrar action bar si es necesario
+                        supportActionBar?.show()
+                    }
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting up navigation", e)
+        }
+    }
+
+    // ✅ MANEJAR BACK BUTTON EN ACTIVITY
+    override fun onBackPressed() {
+        try {
+            val navController = findNavController(R.id.nav_host_fragment_content_main)
+
+            when (navController.currentDestination?.id) {
+                R.id.FirstFragment -> {
+                    // En login, salir de la app
+                    Log.d(TAG, "Back pressed in FirstFragment - exiting app")
+                    finishAffinity()
+                }
+                R.id.SecondFragment -> {
+                    // En main, hacer logout
+                    Log.d(TAG, "Back pressed in SecondFragment - logging out")
+                    performLogout()
+                }
+                else -> {
+                    // Default behavior
+                    super.onBackPressed()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling back press", e)
+            super.onBackPressed()
+        }
+    }
+
+    // ✅ FUNCIÓN DE LOGOUT DESDE ACTIVITY
+    private fun performLogout() {
+        try {
+            Log.d(TAG, "Performing logout from MainActivity")
+
+            // Limpiar sesión
+            with(sharedPreferences.edit()) {
+                clear()
+                apply()
+            }
+
+            // Navegar a FirstFragment
+            val navController = findNavController(R.id.nav_host_fragment_content_main)
+            navController.popBackStack(R.id.FirstFragment, false)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error performing logout", e)
+
+            // Reiniciar activity
+            recreate()
+        }
+    }
+    // ✅ VERIFICAR SESIÓN AL RESUMIR ACTIVITY
+    override fun onResume() {
+        super.onResume()
+
+        try {
+            val token = sharedPreferences.getString("jwt_token", null)
+            val navController = findNavController(R.id.nav_host_fragment_content_main)
+
+            Log.d(TAG, "MainActivity resumed - Token exists: ${token != null}, Current: ${navController.currentDestination?.id}")
+
+            // ✅ VERIFICAR CONSISTENCIA DE NAVEGACIÓN
+            if (token == null && navController.currentDestination?.id == R.id.SecondFragment) {
+                Log.w(TAG, "No token but in SecondFragment - redirecting to login")
+                navController.popBackStack(R.id.FirstFragment, false)
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onResume", e)
         }
     }
 

@@ -26,6 +26,198 @@
 
     <!-- Other UI elements -->
     <color name="gray">#757575</color> <!-- Gray for icons like device status -->
-    <color name="divider">#E0E0E0</color> <!-- Divider color for real-time status card -->
     <color name="safe_zone_inactive">#0288D1</color> <!-- Light blue for safe zone button -->
+    <!-- =============================================== -->
+    <!-- 🎨 COLORES PRINCIPALES - PEREGRINO GPS BRAND -->
+    <!-- =============================================== -->
+
+    <!-- Colores primarios del sistema -->
+    <color name="primary_blue">#3498DB</color>
+    <color name="primary_blue_dark">#2980B9</color>
+    <color name="primary_blue_light">#5DADE2</color>
+
+    <color name="primary_green">#27AE60</color>
+    <color name="primary_green_dark">#1E8449</color>
+    <color name="primary_green_light">#52C882</color>
+
+    <color name="primary_purple">#9B59B6</color>
+    <color name="primary_purple_dark">#7D3C98</color>
+    <color name="primary_purple_light">#BB8FCE</color>
+
+    <color name="primary_orange">#E67E22</color>
+    <color name="primary_orange_dark">#BA4A00</color>
+    <color name="primary_orange_light">#F39C12</color>
+
+    <color name="primary_red">#E74C3C</color>
+    <color name="primary_red_dark">#C0392B</color>
+    <color name="primary_red_light">#EC7063</color>
+
+    <!-- =============================================== -->
+    <!-- 🌈 GRADIENTES PARA FONDOS -->
+    <!-- =============================================== -->
+
+    <color name="gradient_start">#667eea</color>
+    <color name="gradient_end">#764ba2</color>
+    <color name="gradient_login_start">#4facfe</color>
+    <color name="gradient_login_end">#00f2fe</color>
+
+    <!-- =============================================== -->
+    <!-- 🎯 BACKGROUNDS Y SUPERFICIES -->
+    <!-- =============================================== -->
+    <color name="background_secondary">#FFFFFF</color>
+    <color name="background_card">#FFFFFF</color>
+    <color name="background_overlay">#80000000</color>
+
+    <!-- Backgrounds para diferentes estados -->
+    <color name="background_success">#D4F6D4</color>
+    <color name="background_warning">#FFF3CD</color>
+    <color name="background_error">#F8D7DA</color>
+    <color name="background_info">#D1ECF1</color>
+
+    <!-- =============================================== -->
+    <!-- ✍️ COLORES DE TEXTO -->
+    <!-- =============================================== -->
+    <color name="text_accent">#3498DB</color>
+    <color name="text_white">#FFFFFF</color>
+    <color name="text_light_gray">#B3FFFFFF</color>
+    <color name="text_dark_gray">#34495E</color>
+
+    <!-- =============================================== -->
+    <!-- 📊 COLORES DE ESTADO Y FEEDBACK -->
+    <!-- =============================================== -->
+
+    <color name="status_success">#27AE60</color>
+    <color name="status_success_light">#A8E6A8</color>
+    <color name="status_warning">#F39C12</color>
+    <color name="status_warning_light">#FFEAA7</color>
+    <color name="status_error">#E74C3C</color>
+    <color name="status_error_light">#FADBD8</color>
+    <color name="status_info">#3498DB</color>
+    <color name="status_info_light">#AED6F1</color>
+
+    <!-- =============================================== -->
+    <!-- 🔲 BORDES Y DIVISORES -->
+    <!-- =============================================== -->
+
+    <color name="border_light">#E9ECEF</color>
+    <color name="border_medium">#DEE2E6</color>
+    <color name="border_dark">#CED4DA</color>
+    <color name="divider">#E0E0E0</color>
+
+    <!-- =============================================== -->
+    <!-- 🌗 COLORES NEUTROS -->
+    <!-- =============================================== -->
+
+    <color name="gray_50">#F8F9FA</color>
+    <color name="gray_100">#F1F3F4</color>
+    <color name="gray_200">#E9ECEF</color>
+    <color name="gray_300">#DEE2E6</color>
+    <color name="gray_400">#CED4DA</color>
+    <color name="gray_500">#ADB5BD</color>
+    <color name="gray_600">#6C757D</color>
+    <color name="gray_700">#495057</color>
+    <color name="gray_800">#343A40</color>
+    <color name="gray_900">#212529</color>
+
+    <!-- =============================================== -->
+    <!-- 🗺️ COLORES ESPECÍFICOS DEL MAPA -->
+    <!-- =============================================== -->
+
+    <color name="map_marker_normal">#27AE60</color>
+    <color name="map_marker_safe_zone">#3498DB</color>
+    <color name="map_marker_outside_zone">#E74C3C</color>
+    <color name="map_safe_zone_fill">#333498DB</color>
+    <color name="map_safe_zone_stroke">#3498DB</color>
+
+    <!-- =============================================== -->
+    <!-- 🚗 COLORES ESPECÍFICOS DEL VEHÍCULO -->
+    <!-- =============================================== -->
+
+    <color name="vehicle_normal">#27AE60</color>
+    <color name="vehicle_normal_dark">#1E8449</color>
+    <color name="vehicle_in_safe_zone">#3498DB</color>
+    <color name="vehicle_in_safe_zone_dark">#2980B9</color>
+    <color name="vehicle_outside_safe_zone">#E74C3C</color>
+    <color name="vehicle_outside_safe_zone_dark">#C0392B</color>
+
+    <!-- =============================================== -->
+    <!-- 💫 COLORES DE OVERLAY Y TRANSPARENCIAS -->
+    <!-- =============================================== -->
+
+    <color name="overlay_dark">#80000000</color>
+    <color name="overlay_light">#40FFFFFF</color>
+    <color name="card_shadow">#1A000000</color>
+    <color name="ripple_light">#20000000</color>
+    <color name="ripple_dark">#40FFFFFF</color>
+
+    <!-- =============================================== -->
+    <!-- 🎛️ COLORES ESPECÍFICOS DE CONTROLES -->
+    <!-- =============================================== -->
+
+    <color name="switch_track_on">#4CAF50</color>
+    <color name="switch_track_off">#BDBDBD</color>
+    <color name="switch_thumb_on">#FFFFFF</color>
+    <color name="switch_thumb_off">#FAFAFA</color>
+
+    <!-- Colores para progress bars -->
+    <color name="progress_primary">#3498DB</color>
+    <color name="progress_secondary">#E3F2FD</color>
+
+    <!-- =============================================== -->
+    <!-- 🚨 COLORES DE ALERTA Y NOTIFICACIONES -->
+    <!-- =============================================== -->
+
+    <color name="alert_critical">#D32F2F</color>
+    <color name="alert_high">#F57C00</color>
+    <color name="alert_medium">#FBC02D</color>
+    <color name="alert_low">#388E3C</color>
+    <color name="alert_info">#1976D2</color>
+
+    <!-- =============================================== -->
+    <!-- 🌙 SOPORTE PARA MODO OSCURO (OPCIONAL) -->
+    <!-- =============================================== -->
+
+    <color name="dark_background">#121212</color>
+    <color name="dark_surface">#1E1E1E</color>
+    <color name="dark_primary">#BB86FC</color>
+    <color name="dark_secondary">#03DAC6</color>
+    <color name="dark_text_primary">#FFFFFF</color>
+    <color name="dark_text_secondary">#B3FFFFFF</color>
+
+    <!-- =============================================== -->
+    <!-- 🎪 COLORES COMPATIBLES CON ANDROID SYSTEM -->
+    <!-- =============================================== -->
+
+    <!-- Aliases para compatibilidad -->
+    <color name="colorPrimaryDark">@color/primary_blue_dark</color>
+    <color name="colorOnPrimary">@color/text_white</color>
+    <color name="colorSurface">@color/background_card</color>
+    <color name="colorOnSurface">@color/text_primary</color>
+    <color name="colorBackground">@color/background_primary</color>
+    <color name="colorOnBackground">@color/text_primary</color>
+
+    <!-- =============================================== -->
+    <!-- 🏷️ COLORES SEMÁNTICOS ESPECÍFICOS -->
+    <!-- =============================================== -->
+
+    <!-- Estados de conexión -->
+    <color name="connection_connected">#4CAF50</color>
+    <color name="connection_connecting">#FF9800</color>
+    <color name="connection_disconnected">#F44336</color>
+    <color name="connection_error">#E91E63</color>
+
+    <!-- Estados de GPS -->
+    <color name="gps_excellent">#4CAF50</color>
+    <color name="gps_good">#CDDC39</color>
+    <color name="gps_fair">#FF9800</color>
+    <color name="gps_poor">#F44336</color>
+    <color name="gps_no_signal">#9E9E9E</color>
+
+    <!-- Estados de batería -->
+    <color name="battery_high">#4CAF50</color>
+    <color name="battery_medium">#FF9800</color>
+    <color name="battery_low">#F44336</color>
+    <color name="battery_critical">#D32F2F</color>
+
+
 </resources>

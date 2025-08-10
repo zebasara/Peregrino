@@ -1,7 +1,8 @@
 package com.zebass.peregrino.service
 
-import android.os.Bundle
+import android.content.Intent
 import android.os.Build
+import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
@@ -12,13 +13,13 @@ import java.util.*
 
 class AlertActivity : AppCompatActivity() {
 
-    private lateinit var alertManager: AlertManager
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // ✅ USAR LAYOUT SIMPLE EN LUGAR DE MATERIAL
         setContentView(R.layout.activity_alert)
 
-        // Configurar ventana para mostrar sobre pantalla bloqueada
+        // ✅ CONFIGURAR VENTANA PARA MOSTRAR SOBRE PANTALLA BLOQUEADA
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -32,24 +33,68 @@ class AlertActivity : AppCompatActivity() {
             )
         }
 
-        alertManager = AlertManager(this)
+        setupUI()
+    }
 
-        // Configurar UI
-        findViewById<TextView>(R.id.alertTitle).text = "⚠️ VEHICLE ALERT!"
-        findViewById<TextView>(R.id.alertMessage).text =
-            "Your vehicle has left the safe zone!\n\nTime: ${getCurrentTime()}"
+    private fun setupUI() {
+        // ✅ OBTENER DATOS DEL INTENT
+        val distance = intent.getDoubleExtra("alert_distance", 0.0)
+        val vehicleId = intent.getIntExtra("vehicle_id", 0)
 
+        // ✅ CONFIGURAR TEXTOS
+        findViewById<TextView>(R.id.alertTitle).text = "🚨 VEHÍCULO FUERA DE ZONA"
+        findViewById<TextView>(R.id.alertMessage).text = buildString {
+            appendLine("Tu vehículo ha salido de la zona segura!")
+            appendLine()
+            if (distance > 0) {
+                appendLine("Distancia: ${distance.toInt()}m")
+            }
+            appendLine("Hora: ${getCurrentTime()}")
+            appendLine()
+            appendLine("⚠️ Toca una opción para continuar")
+        }
+
+        // ✅ BOTÓN PARA SILENCIAR
         findViewById<Button>(R.id.buttonStopAlert).setOnClickListener {
-            alertManager.stopAlert()
-            finish()
+            stopAlert()
         }
 
+        // ✅ BOTÓN PARA ABRIR APP
         findViewById<Button>(R.id.buttonOpenApp).setOnClickListener {
-            // Abrir la app principal
-            val intent = packageManager.getLaunchIntentForPackage(packageName)
-            startActivity(intent)
-            finish()
+            openMainApp()
         }
+
+        // ✅ BOTÓN PARA DESACTIVAR ZONA (OPCIONAL)
+        findViewById<Button>(R.id.buttonDisableZone).setOnClickListener {
+            disableSafeZone()
+        }
+    }
+
+    private fun stopAlert() {
+        // ✅ ENVIAR BROADCAST PARA DETENER ALARMA
+        val stopIntent = Intent("com.peregrino.STOP_ALARM_BROADCAST")
+        sendBroadcast(stopIntent)
+
+        finish()
+    }
+
+    private fun openMainApp() {
+        try {
+            val intent = packageManager.getLaunchIntentForPackage(packageName)
+            intent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            startActivity(intent)
+        } catch (e: Exception) {
+            // Fallback si no puede abrir la app
+        }
+        finish()
+    }
+
+    private fun disableSafeZone() {
+        // ✅ ENVIAR BROADCAST PARA DESACTIVAR ZONA
+        val disableIntent = Intent("com.peregrino.DISABLE_SAFEZONE_BROADCAST")
+        sendBroadcast(disableIntent)
+
+        finish()
     }
 
     private fun getCurrentTime(): String {
@@ -58,6 +103,7 @@ class AlertActivity : AppCompatActivity() {
 
     override fun onBackPressed() {
         super.onBackPressed()
-        // No permitir cerrar con back, debe usar el botón
+        // ✅ PERMITIR CERRAR PERO DETENER ALARMA
+        stopAlert()
     }
 }

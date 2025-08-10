@@ -1,214 +1,373 @@
+<?xml version="1.0" encoding="utf-8"?>
 <androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/white">
+    android:background="@color/background_primary">
 
-    <!-- Mapa principal -->
-    <org.osmdroid.views.MapView
-        android:id="@+id/mapView"
+    <!-- Mapa principal con esquinas redondeadas -->
+    <androidx.cardview.widget.CardView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_marginBottom="?attr/actionBarSize"
-        android:background="@android:color/white" />
+        android:layout_marginTop="160dp"
+        android:layout_marginBottom="140dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        app:cardCornerRadius="20dp"
+        app:cardElevation="12dp">
 
-    <!-- Panel de información superior MEJORADO -->
+        <org.osmdroid.views.MapView
+            android:id="@+id/mapView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@android:color/white" />
+
+    </androidx.cardview.widget.CardView>
+
+    <!-- Panel superior de información - Diseño profesional -->
     <androidx.cardview.widget.CardView
+        android:id="@+id/topInfoCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_margin="16dp"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="8dp"
-        android:alpha="0.95">
+        app:cardCornerRadius="16dp"
+        app:cardElevation="16dp"
+        android:alpha="0.96"
+        app:cardBackgroundColor="@android:color/white">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="20dp">
 
-            <TextView
-                android:id="@+id/textUser"
+            <!-- Header con logo y título -->
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Usuario"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:textColor="@color/black"
-                android:drawableStart="@android:drawable/ic_menu_myplaces"
-                android:drawableTint="@color/green"
-                android:drawablePadding="8dp"
-                android:gravity="center_vertical" />
-
-            <TextView
-                android:id="@+id/textDeviceInfo"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Información del dispositivo"
-                android:textSize="14sp"
-                android:textColor="@android:color/darker_gray"
-                android:drawableStart="@android:drawable/ic_menu_info_details"
-                android:drawablePadding="8dp"
+                android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:visibility="gone" />
+                android:layout_marginBottom="16dp">
 
-            <!-- ✅ NUEVO: TextView para Status del Sistema -->
-            <TextView
-                android:id="@+id/textStatus"
+                <ImageView
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:src="@drawable/ic_gps_logo"
+                    android:layout_marginEnd="12dp"
+                    app:tint="#3498DB" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Peregrino GPS"
+                    android:textSize="20sp"
+                    android:textStyle="bold"
+                    android:textColor="#2C3E50"
+                    android:fontFamily="sans-serif-medium" />
+
+                <!-- Indicador de conexión -->
+                <View
+                    android:id="@+id/connectionIndicator"
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:background="@drawable/connection_indicator"
+                    android:layout_marginEnd="8dp" />
+
+            </LinearLayout>
+
+            <!-- Información del usuario -->
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="🔄 Iniciando sistema..."
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:textColor="@android:color/darker_gray"
-                android:drawableStart="@android:drawable/ic_dialog_info"
-                android:drawablePadding="8dp"
-                android:gravity="center_vertical"
-                android:background="@drawable/status_background"
-                android:padding="8dp"
-                android:visibility="visible" />
+                android:orientation="horizontal"
+                android:background="@drawable/info_item_background"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:gravity="center_vertical">
 
-            <TextView
-                android:id="@+id/textDeviceStatus"
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_person"
+                    android:layout_marginEnd="12dp"
+                    app:tint="#3498DB" />
+
+                <TextView
+                    android:id="@+id/textUser"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Usuario"
+                    android:textSize="14sp"
+                    android:textColor="#2C3E50"
+                    android:fontFamily="sans-serif" />
+
+            </LinearLayout>
+
+            <!-- Información del dispositivo -->
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Estado del dispositivo"
-                android:textSize="14sp"
-                android:textColor="@android:color/holo_green_dark"
-                android:drawableStart="@drawable/common_full_open_on_phone"
-                android:drawablePadding="8dp"
+                android:orientation="horizontal"
+                android:background="@drawable/info_item_background"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
                 android:gravity="center_vertical"
-                android:visibility="gone" />
+                android:visibility="gone">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_device"
+                    android:layout_marginEnd="12dp"
+                    app:tint="#27AE60" />
+
+                <TextView
+                    android:id="@+id/textDeviceInfo"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Información del dispositivo"
+                    android:textSize="14sp"
+                    android:textColor="#2C3E50"
+                    android:fontFamily="sans-serif" />
+
+            </LinearLayout>
+
+            <!-- Estado del sistema -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:background="@drawable/status_background_modern"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:gravity="center_vertical">
+
+                <ProgressBar
+                    android:id="@+id/statusProgressBar"
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:layout_marginEnd="12dp"
+                    android:indeterminateDrawable="@drawable/progress_circular"
+                    android:visibility="gone" />
+
+                <ImageView
+                    android:id="@+id/statusIcon"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_info"
+                    android:layout_marginEnd="12dp"
+                    app:tint="#F39C12" />
+
+                <TextView
+                    android:id="@+id/textStatus"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🔄 Iniciando sistema..."
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="#2C3E50"
+                    android:fontFamily="sans-serif-medium" />
+
+            </LinearLayout>
+
+            <!-- Estado del dispositivo -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:background="@drawable/device_status_background"
+                android:padding="12dp"
+                android:gravity="center_vertical"
+                android:visibility="gone">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_device_status"
+                    android:layout_marginEnd="12dp"
+                    app:tint="#27AE60" />
+
+                <TextView
+                    android:id="@+id/textDeviceStatus"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Estado del dispositivo"
+                    android:textSize="14sp"
+                    android:textColor="#27AE60"
+                    android:fontFamily="sans-serif-medium" />
+
+            </LinearLayout>
 
         </LinearLayout>
     </androidx.cardview.widget.CardView>
 
-    <!-- Botones flotantes mejorados en el lado derecho -->
+    <!-- Botones flotantes laterales - Estilo moderno -->
     <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="end|center_vertical"
-        android:layout_marginEnd="16dp"
-        android:orientation="vertical">
+        android:layout_gravity="end|bottom"
+        android:layout_marginEnd="20dp"
+        android:layout_marginBottom="160dp"
+    android:orientation="vertical"
+    android:elevation="20dp"
+    android:gravity="center_horizontal">
 
-        <!-- Botón de seguimiento del vehículo mejorado -->
-        <Button
-            android:id="@+id/buttonMyLocation"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="8dp"
-            android:text="📍 Ubicación"
-            android:textColor="@android:color/white"
-            android:backgroundTint="@android:color/holo_blue_dark"
-            app:icon="@android:drawable/ic_menu_mylocation"
-            app:iconTint="@android:color/white" />
+    <!-- Botón de seguimiento del vehículo -->
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/buttonMyLocation"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="Ubicación"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        app:backgroundTint="#3498DB"
+        app:icon="@drawable/ic_my_location"
+        app:iconTint="@android:color/white"
+        app:cornerRadius="24dp"
+        app:elevation="8dp"
+        app:pressedTranslationZ="12dp" />
 
-        <!-- Botón de zona segura -->
-        <Button
-            android:id="@+id/buttonZonaSegura"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="8dp"
-            android:layout_gravity="end"
-            android:text="🛡️ Zona"
-            android:textColor="@android:color/white"
-            android:backgroundTint="@android:color/holo_blue_dark"
-            app:icon="@android:drawable/ic_dialog_map"
-            app:iconTint="@android:color/white" />
+    <!-- Botón de zona segura -->
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/buttonZonaSegura"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="Zona"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        app:backgroundTint="#9B59B6"
+        app:icon="@drawable/ic_shield"
+        app:iconTint="@android:color/white"
+        app:cornerRadius="24dp"
+        app:elevation="8dp"
+        app:pressedTranslationZ="12dp" />
 
-        <!-- Botón de estado del dispositivo -->
-        <Button
-            android:id="@+id/buttonDeviceStatus"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="8dp"
-            android:layout_gravity="end"
-            android:text="📊 Estado"
-            android:textColor="@android:color/white"
-            android:backgroundTint="@android:color/holo_orange_dark"
-            app:icon="@android:drawable/ic_dialog_info"
-            app:iconTint="@android:color/white" />
+    <!-- Botón de estado del dispositivo -->
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/buttonDeviceStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Estado"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        app:backgroundTint="#E67E22"
+        app:icon="@drawable/ic_analytics"
+        app:iconTint="@android:color/white"
+        app:cornerRadius="24dp"
+        app:elevation="8dp"
+        app:pressedTranslationZ="12dp" />
 
-    </LinearLayout>
+</LinearLayout>
 
-    <!-- Panel inferior con botones principales -->
-    <com.google.android.material.bottomappbar.BottomAppBar
+
+    <!-- Panel inferior con diseño profesional -->
+    <androidx.cardview.widget.CardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        app:backgroundTint="@android:color/white"
-        app:elevation="8dp">
+        android:layout_margin="12dp"
+        app:cardCornerRadius="20dp"
+        app:cardElevation="16dp"
+        app:cardBackgroundColor="@android:color/white">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:padding="8dp">
+            android:padding="16dp">
 
             <!-- Botón asociar dispositivo -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonAssociateDevice"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="60dp"
+                android:layout_marginEnd="6dp"
                 android:layout_weight="1"
-                android:layout_marginEnd="4dp"
                 android:text="Asociar\nVehículo"
-                android:textSize="12sp"
-                app:backgroundTint="@android:color/holo_green_dark"
-                app:icon="@android:drawable/ic_input_add"
+                android:textColor="@android:color/white"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:backgroundTint="#27AE60"
+                app:cornerRadius="16dp"
+                app:elevation="4dp"
+                app:icon="@drawable/ic_add_device"
                 app:iconGravity="top"
-                app:cornerRadius="8dp" />
+                app:iconSize="20dp"
+                app:iconTint="@android:color/white" />
 
-            <!-- Botón zona segura (duplicado para fácil acceso) -->
+            <!-- Botón zona segura principal -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonZonaSeguraMain"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="60dp"
+                android:layout_marginStart="3dp"
+                android:layout_marginEnd="3dp"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
                 android:text="Zona\nSegura"
-                android:textSize="12sp"
-                app:backgroundTint="@android:color/holo_blue_dark"
-                app:icon="@android:drawable/ic_dialog_map"
+                android:textColor="@android:color/white"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:backgroundTint="#9B59B6"
+                app:cornerRadius="16dp"
+                app:elevation="4dp"
+                app:icon="@drawable/ic_shield"
                 app:iconGravity="top"
-                app:cornerRadius="8dp" />
+                app:iconSize="20dp"
+                app:iconTint="@android:color/white" />
 
             <!-- Botón configuración GPS -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonShowConfig"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="60dp"
+                android:layout_marginStart="3dp"
+                android:layout_marginEnd="3dp"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
                 android:text="Config\nGPS"
-                android:textSize="12sp"
-                app:backgroundTint="@android:color/holo_orange_dark"
-                app:icon="@android:drawable/ic_menu_preferences"
+                android:textColor="@android:color/white"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:backgroundTint="#E67E22"
+                app:cornerRadius="16dp"
+                app:elevation="4dp"
+                app:icon="@drawable/ic_settings"
                 app:iconGravity="top"
-                app:cornerRadius="8dp" />
+                app:iconSize="20dp"
+                app:iconTint="@android:color/white" />
 
             <!-- Botón logout -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonLogout"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="60dp"
+                android:layout_marginStart="6dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
                 android:text="Salir"
-                android:textSize="12sp"
-                app:backgroundTint="@android:color/holo_red_dark"
-                app:icon="@android:drawable/ic_menu_close_clear_cancel"
+                android:textColor="@android:color/white"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:backgroundTint="#E74C3C"
+                app:cornerRadius="16dp"
+                app:elevation="4dp"
+                app:icon="@drawable/ic_logout"
                 app:iconGravity="top"
-                app:cornerRadius="8dp" />
+                app:iconSize="20dp"
+                app:iconTint="@android:color/white" />
 
         </LinearLayout>
 
-    </com.google.android.material.bottomappbar.BottomAppBar>
+    </androidx.cardview.widget.CardView>
 
     <!-- Elementos ocultos (para compatibilidad) -->
     <ProgressBar

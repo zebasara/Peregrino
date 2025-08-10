@@ -28,8 +28,11 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.Toast
+import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
+import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.fragment.app.Fragment
@@ -291,6 +294,13 @@ class SecondFragment : Fragment() {
             }
         }
         alertManager = AlertManager(requireContext())
+        // Configurar logout
+        setupLogoutButton()
+
+        // Manejar back button
+        requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner) {
+            logout() // Logout cuando presione back
+        }
     }
 
     private fun clearCorruptedCaches() {
@@ -353,11 +363,19 @@ class SecondFragment : Fragment() {
     private fun checkDeviceStatus() {
         debugDeviceState()
 
-        // USAR EL UNIQUE_ID REAL DE LAS PREFERENCIAS
+        // ✅ USAR SIEMPRE EL UNIQUE_ID REAL
         val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
         if (deviceUniqueId == null) {
             showSnackbar("❌ No hay dispositivo asociado", Snackbar.LENGTH_SHORT)
             updateStatusUI("❌ No hay dispositivo asociado", android.R.color.holo_red_dark)
+            return
+        }
+
+        // ✅ VALIDAR QUE ES UN ID VÁLIDO, NO UN MENSAJE DE ERROR
+        if (deviceUniqueId.contains("offline") || deviceUniqueId.contains("error")) {
+            Log.e(TAG, "❌ Invalid deviceUniqueId detected: $deviceUniqueId")
+            showSnackbar("❌ ID de dispositivo corrupto. Re-asocia el vehículo.", Snackbar.LENGTH_LONG)
+            clearDevicePreferences()
             return
         }
 
@@ -374,7 +392,7 @@ class SecondFragment : Fragment() {
         // UI feedback inmediato
         updateStatusUI("🔄 Verificando estado del dispositivo...", android.R.color.darker_gray)
 
-        // Usar uniqueId REAL
+        // ✅ USAR UNIQUE_ID VALIDADO
         viewModel.checkDeviceStatus(deviceUniqueId) { isOnline, message ->
             val statusIcon = if (isOnline) "🟢" else "🔴"
             val displayMessage = "$statusIcon $message"
@@ -395,6 +413,23 @@ class SecondFragment : Fragment() {
 
             Log.d(TAG, "Device status check completed: $displayMessage")
         }
+    }
+
+    // ✅ AGREGAR FUNCIÓN PARA LIMPIAR PREFERENCIAS CORRUPTAS
+    private fun clearDevicePreferences() {
+        sharedPreferences.edit {
+            remove(DEVICE_ID_PREF)
+            remove(DEVICE_NAME_PREF)
+            remove(DEVICE_UNIQUE_ID_PREF)
+            remove(PREF_SAFEZONE_LAT)
+            remove(PREF_SAFEZONE_LON)
+        }
+
+        deviceInfoCache.clear()
+        safeZoneCache.clear()
+        lastPositionCache.clear()
+
+        updateStatusUI("⚠️ Dispositivo desasociado. Vuelve a asociar tu vehículo.", android.R.color.holo_orange_dark)
     }
 
     // ============ SETUP FUNCTIONS OPTIMIZADAS ============
@@ -464,9 +499,9 @@ class SecondFragment : Fragment() {
                 toggleVehicleFollowing()
             }
 
-            // Long click para centrar en mi ubicación
+            // ✅ NUEVO: Long click para refrescar posición
             buttonMyLocation.setOnLongClickListener {
-                centerOnMyLocation()
+                performForceRefresh(getDeviceUniqueId() ?: return@setOnLongClickListener false)
                 true
             }
 
@@ -476,27 +511,28 @@ class SecondFragment : Fragment() {
             buttonDeviceStatus.setOnClickListener { checkDeviceStatus() }
             buttonShowConfig.setOnClickListener { showTraccarClientConfig() }
 
+            // ✅ NUEVO: Long press para limpiar posiciones antiguas
+            buttonDeviceStatus.setOnLongClickListener {
+                clearOldPositionsDialog()
+                true
+            }
+
+            // ✅ NUEVO: Ayuda sobre solución de problemas
+            binding.buttonShowConfig.setOnLongClickListener {
+                showPositionTroubleshootingDialog()
+                true
+            }
+
             // Actualizar texto del botón para reflejar nueva funcionalidad
             updateFollowButtonText()
 
             // Ocultar elementos no necesarios
             buttonDescargarOffline.visibility = View.GONE
             progressBarDownload.visibility = View.GONE
-            // En setupButtons() después de los otros botones:
-            binding.buttonDeviceStatus.setOnLongClickListener {
-                // Long press para debug
-                viewModel.debugSafeZoneState { debugInfo ->
-                    MaterialAlertDialogBuilder(requireContext())
-                        .setTitle("Debug Zona Segura")
-                        .setMessage(debugInfo)
-                        .setPositiveButton("OK", null)
-                        .show()
-                }
-                true
-            }
         }
-        Log.d(TAG, "✅ Botones configurados - Seguimiento vehículo mejorado")
+        Log.d(TAG, "✅ Botones configurados con funciones de limpieza de posiciones antiguas")
     }
+
     // ============ ACTUALIZACIÓN DINÁMICA DE ICONOS ============
     private fun updateMarkerIcon(marker: Marker, state: VehicleState) {
         // Crear bitmap personalizado con forma y color
@@ -630,27 +666,6 @@ class SecondFragment : Fragment() {
         }
     }
 
-    // ✅ NUEVA FUNCIÓN PARA LOGOUT FORZADO
-    private fun forceLogout() {
-        Log.d(TAG, "🚪 Forcing logout due to authentication failure")
-
-        sharedPreferences.edit {
-            remove("jwt_token")
-            remove("user_email")
-            remove("user_password") // También limpiar password
-            remove(DEVICE_ID_PREF)
-            remove(DEVICE_NAME_PREF)
-            remove(DEVICE_UNIQUE_ID_PREF)
-        }
-
-        // ✅ LIMPIAR ESTADO
-        shouldReconnect.set(false)
-        cancelStatusCheck()
-        webSocket?.close(1000, "Force logout")
-
-        findNavController().navigate(R.id.action_SecondFragment_to_FirstFragment)
-        showSnackbar("Sesión expirada. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
-    }
     // ============ FIX 10: Nueva función para centrar en ubicación personal ============
     private suspend fun setupMap() = withContext(Dispatchers.Main) {
         map = binding.mapView.apply {
@@ -709,16 +724,26 @@ class SecondFragment : Fragment() {
         val uniqueId = prefs.getString(DEVICE_UNIQUE_ID_PREF, null)
         val deviceName = prefs.getString(DEVICE_NAME_PREF, null)
 
-        val hasDevice = !uniqueId.isNullOrEmpty() && !deviceName.isNullOrEmpty()
+        // ✅ VALIDAR QUE NO SEAN MENSAJES DE ERROR
+        val hasValidDevice = !uniqueId.isNullOrEmpty() &&
+                !deviceName.isNullOrEmpty() &&
+                !uniqueId.contains("offline") &&
+                !uniqueId.contains("error") &&
+                !uniqueId.contains("Traccar")
 
-        if (hasDevice) {
-            Log.d(TAG, "✅ Device found: uniqueId=$uniqueId, name=$deviceName")
+        if (hasValidDevice) {
+            Log.d(TAG, "✅ Valid device found: uniqueId=$uniqueId, name=$deviceName")
         } else {
-            Log.w(TAG, "❌ No associated device found")
+            Log.w(TAG, "❌ No valid device found or corrupted data: uniqueId=$uniqueId")
+            if (!uniqueId.isNullOrEmpty() && (uniqueId.contains("offline") || uniqueId.contains("error"))) {
+                // Limpiar datos corruptos
+                clearDevicePreferences()
+            }
         }
 
-        return hasDevice
+        return hasValidDevice
     }
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun observeViewModel() {
         // Observar posición del vehículo
         lifecycleScope.launch {
@@ -782,10 +807,30 @@ class SecondFragment : Fragment() {
         lifecycleScope.launch {
             viewModel.error.collectLatest { error ->
                 error?.let {
-                    showSnackbar(it, Snackbar.LENGTH_LONG)
-                    Log.e(TAG, "❌ Error from ViewModel: $it")
-                    if (it.contains("401")) {
-                        handleUnauthorizedError()
+                    if (it.contains("Posición muy antigua ignorada")) {
+                        // ✅ MOSTRAR DIÁLOGO AUTOMÁTICO PARA LIMPIAR
+                        handler.postDelayed({
+                            if (isAdded) {
+                                MaterialAlertDialogBuilder(requireContext())
+                                    .setTitle("⚠️ Posición Antigua Detectada")
+                                    .setMessage("Se detectó una posición muy antigua. ¿Quieres limpiar el caché y obtener datos frescos?")
+                                    .setPositiveButton("🧹 Sí, Limpiar") { _, _ ->
+                                        getDeviceUniqueId()?.let { uniqueId ->
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                performClearOldPositions(uniqueId)
+                                            }
+                                        }
+                                    }
+                                    .setNegativeButton("❌ No", null)
+                                    .show()
+                            }
+                        }, 1500)
+                    } else {
+                        showSnackbar(it, Snackbar.LENGTH_LONG)
+                        Log.e(TAG, "❌ Error from ViewModel: $it")
+                        if (it.contains("401")) {
+                            handleUnauthorizedError()
+                        }
                     }
                 }
             }
@@ -802,8 +847,6 @@ class SecondFragment : Fragment() {
             }
         }
     }
-
-
     // ============ SERVICIOS OPTIMIZADOS ============
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -820,6 +863,19 @@ class SecondFragment : Fragment() {
             // Delay más grande para status check
             delay(2000)
             startPeriodicStatusCheck()
+        }
+    }
+    private fun formatPositionAge(age: Int?): String {
+        return when {
+            age == null -> ""
+            age == 0 -> " (ahora)"
+            age == 1 -> " (1 min)"
+            age < 60 -> " (${age} min)"
+            else -> {
+                val hours = age / 60
+                val minutes = age % 60
+                if (minutes == 0) " (${hours}h)" else " (${hours}h ${minutes}min)"
+            }
         }
     }
 
@@ -892,7 +948,6 @@ class SecondFragment : Fragment() {
             return
         }
 
-        // USAR EL UNIQUE_ID REAL DE LAS PREFERENCIAS
         val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
         if (deviceUniqueId == null) {
             Log.e(TAG, "❌ No device uniqueId found in preferences")
@@ -902,65 +957,61 @@ class SecondFragment : Fragment() {
 
         Log.d(TAG, "📍 Fetching initial position for device uniqueId: $deviceUniqueId")
 
-        // Check cache primero usando uniqueId REAL
-        lastPositionCache.get()?.let { cached ->
-            Log.d(TAG, "✅ Using cached position for uniqueId: $deviceUniqueId")
-            updateVehiclePosition(deviceUniqueId.toIntOrNull() ?: deviceUniqueId.hashCode(), cached)
-            return
-        }
+        // ✅ NO USAR CACHE - SIEMPRE OBTENER POSICIÓN FRESCA
+        lastPositionCache.clear()
 
         lifecycleScope.launch {
             try {
-                updateStatusUI("🔄 Obteniendo posición inicial...", android.R.color.darker_gray)
+                updateStatusUI("🔄 Obteniendo posición actual...", android.R.color.darker_gray)
 
-                // Pasar uniqueId REAL al ViewModel
                 val position = viewModel.getLastPosition(deviceUniqueId)
                 val geoPoint = GeoPoint(position.latitude, position.longitude)
-                val timestampStr = position.timestamp
-                try {
-                    val timestamp = if (!timestampStr.isNullOrEmpty()) {
-                        java.time.Instant.parse(timestampStr).toEpochMilli()
-                    } else {
-                        System.currentTimeMillis()
-                    }
-                    val minutesOld = (System.currentTimeMillis() - timestamp) / 1000 / 60
-                    val absMinutesOld = kotlin.math.abs(minutesOld)
-                    if (absMinutesOld > 60) { // 1 hora máximo
-                        Log.w(TAG, "❌ Position timestamp issue for deviceUniqueId=$deviceUniqueId, $minutesOld minutes difference")
-                        updateStatusUI("❌ Problema de timestamp - verifica configuración", android.R.color.holo_red_dark)
-                        return@launch
-                    }
 
-                    if (absMinutesOld > 15) { // Advertir pero continuar
-                        Log.w(TAG, "⚠️ Position getting old for deviceUniqueId=$deviceUniqueId, $minutesOld minutes but processing")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "⚠️ No se pudo parsear el timestamp: $timestampStr, asumiendo posición reciente")
+                Log.d(TAG, "✅ Fresh position obtained for uniqueId $deviceUniqueId: lat=${position.latitude}, lon=${position.longitude}")
+                updateVehiclePosition(deviceUniqueId.hashCode(), geoPoint)
+
+                // ✅ MOSTRAR INFORMACIÓN DE LA POSICIÓN CON VERIFICACIÓN SEGURA
+                val ageInfo = when {
+                    position.age != null && position.age > 0 -> " (${position.age} min)"
+                    position.quality != null -> " (${position.quality})"
+                    else -> ""
                 }
 
-                Log.d(TAG, "✅ Initial position fetched for uniqueId $deviceUniqueId: lat=${position.latitude}, lon=${position.longitude}")
-                updateVehiclePosition(deviceUniqueId.toIntOrNull() ?: deviceUniqueId.hashCode(), geoPoint)
+                val qualityEmoji = when (position.quality) {
+                    "excellent" -> "🟢"
+                    "good" -> "🟡"
+                    "acceptable" -> "🟠"
+                    else -> "🔵"
+                }
 
-                updateStatusUI("✅ Posición inicial cargada", android.R.color.holo_green_dark)
+                updateStatusUI("✅ Posición actual cargada$ageInfo $qualityEmoji", android.R.color.holo_green_dark)
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to fetch initial position for uniqueId $deviceUniqueId", e)
-                val errorMsg = when {
-                    e.message?.contains("404") == true -> "No hay posiciones disponibles para este dispositivo"
-                    e.message?.contains("403") == true -> "Dispositivo no autorizado"
-                    e.message?.contains("401") == true -> "Token de autenticación inválido"
-                    else -> "Error al obtener posición inicial: ${e.message}"
-                }
 
-                showSnackbar("❌ $errorMsg", Snackbar.LENGTH_LONG)
-                updateStatusUI("❌ $errorMsg", android.R.color.holo_red_dark)
-
-                if (e.message?.contains("401") == true) {
-                    handleUnauthorizedError()
+                when {
+                    e.message?.contains("muy antigua") == true -> {
+                        updateStatusUI("⚠️ Solo hay posiciones antiguas disponibles", android.R.color.holo_orange_dark)
+                        showSnackbar("⚠️ ${e.message} - Usa Long Press en 'Estado' para limpiar", Snackbar.LENGTH_LONG)
+                    }
+                    e.message?.contains("404") == true -> {
+                        updateStatusUI("❌ No hay posiciones disponibles", android.R.color.holo_red_dark)
+                        showSnackbar("❌ Dispositivo no tiene posiciones. Verifica configuración GPS.", Snackbar.LENGTH_LONG)
+                    }
+                    e.message?.contains("401") == true -> {
+                        handleUnauthorizedError()
+                    }
+                    else -> {
+                        val errorMsg = "Error al obtener posición: ${e.message}"
+                        showSnackbar("❌ $errorMsg", Snackbar.LENGTH_LONG)
+                        updateStatusUI("❌ $errorMsg", android.R.color.holo_red_dark)
+                    }
                 }
             }
         }
     }
+
+
 
     // Fix en setupWebSocket con mejor manejo de errores
     private fun setupWebSocket() {
@@ -1299,29 +1350,6 @@ class SecondFragment : Fragment() {
         }
     }
 
-    // ============ FUNCIONES DE DISPOSITIVO OPTIMIZADAS ============
-    private fun updateStatusUI(message: String, colorResId: Int? = null) {
-        // ✅ VERIFICAR QUE BINDING NO SEA NULL Y FRAGMENT ESTÉ ACTIVO
-        if (!isAdded || _binding == null || !isResumed) {
-            Log.w(TAG, "Fragment not ready for UI update, skipping: $message")
-            return
-        }
-
-        try {
-            // ✅ USAR EL TextView QUE SÍ EXISTE
-            binding.textDeviceStatus.text = message
-            binding.textDeviceStatus.visibility = View.VISIBLE
-
-            colorResId?.let {
-                binding.textDeviceStatus.setTextColor(
-                    ContextCompat.getColor(requireContext(), it)
-                )
-            }
-            Log.d(TAG, "✅ Status updated: $message")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error updating status UI: ${e.message}")
-        }
-    }
     private fun startPeriodicStatusCheck() {
         if (!hasAssociatedDevice()) return
 
@@ -1390,7 +1418,7 @@ class SecondFragment : Fragment() {
             handleUnauthorizedError()
             return
         }
-        // USAR SIEMPRE EL UNIQUE_ID REAL DE LAS PREFERENCIAS
+
         val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
         if (deviceUniqueId == null) {
             showSnackbar("❌ No se encontró ID único del dispositivo", Snackbar.LENGTH_SHORT)
@@ -1400,53 +1428,37 @@ class SecondFragment : Fragment() {
         Log.d(TAG, "🛡️ Establishing safe zone for REAL uniqueId: $deviceUniqueId")
 
         binding.buttonZonaSegura.apply {
-            text = "Obteniendo ubicación del vehículo..."  // ✅ Usar text directamente
+            text = "Obteniendo ubicación del vehículo..."
             isEnabled = false
         }
+
         lifecycleScope.launch {
             try {
-                // Usar uniqueId REAL para obtener posición
-                val position = viewModel.getLastPosition(deviceUniqueId)
+                // ✅ INTENTAR PRIMERO CON POSICIONES RECIENTES
+                val position = try {
+                    viewModel.getLastPosition(deviceUniqueId)
+                } catch (e: Exception) {
+                    if (e.message?.contains("muy antigua") == true || e.message?.contains("too_old") == true) {
+                        // ✅ SI FALLA POR POSICIÓN ANTIGUA, PREGUNTAR AL USUARIO
+                        showOldPositionDialog(deviceUniqueId, e.message)
+                        return@launch
+                    } else {
+                        throw e
+                    }
+                }
+
+                // Si llegamos aquí, la posición es reciente
                 val geoPoint = GeoPoint(position.latitude, position.longitude)
-
-                // Enviar al servidor usando uniqueId REAL
-                viewModel.sendSafeZoneToServer(
-                    position.latitude,
-                    position.longitude,
-                    deviceUniqueId
-                )
-
-                // Actualizar UI y caché
-                safeZone = geoPoint
-                safeZoneCache.set(geoPoint)
-                updateSafeZoneUI(geoPoint)
-
-                // Guardar en preferencias
-                sharedPreferences.edit {
-                    putString(PREF_SAFEZONE_LAT, position.latitude.toString())
-                    putString(PREF_SAFEZONE_LON, position.longitude.toString())
-                }
-
-                // Confirmar con el servidor
-                viewModel.fetchSafeZoneFromServer()
-
-                binding.buttonZonaSegura.apply {
-                    text = "Zona Segura Activa ✓"
-                    isEnabled = true
-                }
-
-                Log.d(TAG, "✅ Safe zone established successfully for uniqueId: $deviceUniqueId")
+                createSafeZoneSuccessfully(geoPoint, deviceUniqueId, position.age)
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to establish safe zone for uniqueId: $deviceUniqueId", e)
                 showSnackbar("Fallo al establecer zona segura: ${e.message}", Snackbar.LENGTH_LONG)
-                binding.buttonZonaSegura.apply {
-                    text = "Establecer Zona Segura"
-                    isEnabled = true
-                }
+                restoreSafeZoneButton()
             }
         }
     }
+
 
     private fun toggleSafeZone() {
         if (JWT_TOKEN.isNullOrEmpty()) {
@@ -1828,10 +1840,6 @@ class SecondFragment : Fragment() {
             .setNegativeButton("OK", null)
             .show()
     }
-    // ============ FIX 2: Nueva función para obtener el uniqueId correcto ============
-    private fun getDeviceUniqueId(): String? {
-        return sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
-    }
 
     private fun hasLocationPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
@@ -1851,11 +1859,6 @@ class SecondFragment : Fragment() {
         return (now - lastPositionUpdate.get()) >= POSITION_UPDATE_THROTTLE
     }
 
-    private fun showSnackbar(message: String, duration: Int) {
-        if (isAdded && view != null) {
-            Snackbar.make(binding.root, message, duration).show()
-        }
-    }
     // Fix en loadDeviceInfo para refresh completo
     private fun loadDeviceInfo() {
         Log.d(TAG, "Loading device info...")
@@ -1890,29 +1893,6 @@ class SecondFragment : Fragment() {
         } catch (e: Exception) {
             showSnackbar("❌ No hay navegador disponible", Snackbar.LENGTH_SHORT)
         }
-    }
-
-    private fun logout() {
-        shouldReconnect.set(false)
-        cancelStatusCheck()
-        cancelReconnect()
-        handler.removeCallbacksAndMessages(null)
-        webSocket?.close(1000, "Fragment destruido")
-        webSocket = null
-
-        sharedPreferences.edit {
-            remove("jwt_token")
-            remove("user_email")
-            remove(DEVICE_ID_PREF)
-            remove(DEVICE_NAME_PREF)
-            remove(DEVICE_UNIQUE_ID_PREF)
-            remove(PREF_SAFEZONE_LAT)
-            remove(PREF_SAFEZONE_LON)
-            apply()
-        }
-
-        findNavController().navigate(R.id.action_SecondFragment_to_FirstFragment)
-        Log.d(TAG, "Usuario cerró sesión y preferencias limpiadas")
     }
 
     // REEMPLAZAR handleUnauthorizedError POR ESTA VERSIÓN
@@ -2184,13 +2164,42 @@ class SecondFragment : Fragment() {
         binding.buttonZonaSeguraMain.text = text
     }
 
-    private fun restoreSafeZoneButton() {
-        binding.buttonZonaSegura.isEnabled = true
-        binding.buttonZonaSeguraMain.isEnabled = true
-        updateSafeZoneButtonText(
-            if (safeZone != null) "🛡️ Zona Segura Activa ✓"
-            else "🛡️ Establecer Zona Segura"
-        )
+    private fun showOldPositionDialog(deviceUniqueId: String, errorMessage: String?) {
+        val ageInfo = extractAgeFromError(errorMessage)
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("⚠️ Posición Muy Antigua")
+            .setMessage(
+                buildString {
+                    appendLine("La última posición del dispositivo es muy antigua${ageInfo}.")
+                    appendLine()
+                    appendLine("OPCIONES:")
+                    appendLine()
+                    appendLine("🛡️ CREAR ZONA SEGURA:")
+                    appendLine("• Usar la posición antigua disponible")
+                    appendLine("• La zona funcionará pero es recomendable actualizar GPS")
+                    appendLine()
+                    appendLine("📱 CONFIGURAR GPS:")
+                    appendLine("• Configura tu dispositivo para enviar datos actuales")
+                    appendLine("• Usa 'Mostrar Configuración' para ver instrucciones")
+                    appendLine()
+                    appendLine("⚠️ IMPORTANTE: Para máxima precisión, configura tu GPS para enviar datos cada 5-10 minutos.")
+                }
+            )
+            .setPositiveButton("🛡️ Crear con Posición Antigua") { _, _ ->
+                createSafeZoneWithOldPosition(deviceUniqueId)
+            }
+            .setNeutralButton("📱 Ver Configuración GPS") { _, _ ->
+                restoreSafeZoneButton()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    showTraccarClientConfig()
+                }
+            }
+            .setNegativeButton("❌ Cancelar") { _, _ ->
+                restoreSafeZoneButton()
+            }
+            .setCancelable(false)
+            .show()
     }
 
     private fun isSafeZoneActive(): Boolean {
@@ -2253,8 +2262,635 @@ class SecondFragment : Fragment() {
             }
         }
     }
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun clearOldPositionsDialog() {
+        val deviceUniqueId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
 
-    // ============ LIFECYCLE OPTIMIZADO ============
+        if (deviceUniqueId == null) {
+            showSnackbar("❌ No hay dispositivo asociado", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("🧹 Limpiar Posiciones Antiguas")
+            .setMessage(
+                "¿Quieres limpiar todas las posiciones en caché y forzar la obtención de datos frescos?\n\n" +
+                        "Esto es útil si:\n" +
+                        "• Ves posiciones muy antiguas\n" +
+                        "• El GPS no se actualiza\n" +
+                        "• Hay problemas de sincronización"
+            )
+            .setPositiveButton("🧹 Sí, Limpiar") { _, _ ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    performClearOldPositions(deviceUniqueId)
+                }
+            }
+            .setNeutralButton("🔄 Solo Refrescar") { _, _ ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    performForceRefresh(deviceUniqueId)
+                }
+            }
+            .setNegativeButton("❌ Cancelar", null)
+            .show()
+    }
+// ============ SOLO REFRESCAR SIN LIMPIAR ============
+    private fun showPositionTroubleshootingDialog() {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("🔧 Solución de Problemas de Posición")
+            .setMessage(
+                buildString {
+                    appendLine("Si tienes problemas con posiciones antiguas:")
+                    appendLine()
+                    appendLine("🧹 LIMPIAR POSICIONES ANTIGUAS:")
+                    appendLine("• Long press en 'Estado del Dispositivo'")
+                    appendLine("• Selecciona 'Sí, Limpiar'")
+                    appendLine()
+                    appendLine("🔄 SOLO REFRESCAR:")
+                    appendLine("• Long press en 'Ubicación'")
+                    appendLine("• O Long press en 'Estado' → 'Solo Refrescar'")
+                    appendLine()
+                    appendLine("📱 CONFIGURAR GPS:")
+                    appendLine("• Verifica que tu app GPS esté enviando datos")
+                    appendLine("• Usa 'Mostrar Configuración' para revisar settings")
+                    appendLine("• Asegúrate de que el timestamp sea correcto")
+                    appendLine()
+                    appendLine("⏰ CALIDAD DE POSICIONES:")
+                    appendLine("• 🟢 Excelente: < 5 minutos")
+                    appendLine("• 🟡 Buena: < 15 minutos")
+                    appendLine("• 🟠 Aceptable: < 30 minutos")
+                    appendLine("• 🔴 Muy antigua: > 30 minutos")
+                    appendLine()
+                    appendLine("💡 TIP: Las posiciones muestran su edad y calidad")
+                }
+            )
+            .setPositiveButton("✅ Entendido", null)
+            .setNeutralButton("🧹 Limpiar Ahora") { _, _ ->
+                getDeviceUniqueId()?.let { uniqueId ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        performClearOldPositions(uniqueId)
+                    }
+                }
+            }
+            .show()
+    }
+    private fun getDeviceUniqueId(): String? {
+        return sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
+    }
+
+    // ============ RECIBIENDO POSICIONES ANTIGUAS
+    private fun createSafeZoneWithOldPosition(deviceUniqueId: String) {
+        binding.buttonZonaSegura.apply {
+            text = "⚠️ Usando posición antigua..."
+            isEnabled = false
+        }
+
+        lifecycleScope.launch {
+            try {
+                val json = JSONObject().apply {
+                    put("deviceId", deviceUniqueId)
+                }
+
+                val requestBody = json.toString().toRequestBody("application/json".toMediaType())
+
+                val request = Request.Builder()
+                    .url("https://carefully-arriving-shepherd.ngrok-free.app/api/safezone/force-old-position")
+                    .post(requestBody)
+                    .addHeader("Authorization", "Bearer $JWT_TOKEN")
+                    .build()
+
+                val response = client.newCall(request).execute()
+
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    val responseJson = JSONObject(responseBody ?: "{}")
+
+                    val lat = responseJson.getJSONObject("safeZone").getDouble("latitude")
+                    val lon = responseJson.getJSONObject("safeZone").getDouble("longitude")
+                    val warning = responseJson.optString("warning", "")
+                    val ageHours = responseJson.optInt("ageHours", 0)
+
+                    val geoPoint = GeoPoint(lat, lon)
+                    createSafeZoneSuccessfully(geoPoint, deviceUniqueId, ageHours * 60) // Convertir a minutos
+
+                    // Mostrar warning adicional
+                    handler.postDelayed({
+                        showSnackbar("⚠️ $warning", Snackbar.LENGTH_LONG)
+                    }, 1000)
+
+                } else {
+                    val errorBody = response.body?.string()
+                    throw Exception("Error del servidor: $errorBody")
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error creating safe zone with old position", e)
+                showSnackbar("❌ Error: ${e.message}", Snackbar.LENGTH_LONG)
+                restoreSafeZoneButton()
+            }
+        }
+    }
+
+// ============ FUNCIÓN HELPER PARA CREAR ZONA SEGURA EXITOSA ============
+
+    private fun createSafeZoneSuccessfully(geoPoint: GeoPoint, deviceUniqueId: String, ageMinutes: Int?) {
+        // Actualizar UI y caché
+        safeZone = geoPoint
+        safeZoneCache.set(geoPoint)
+        updateSafeZoneUI(geoPoint)
+
+        // Guardar en preferencias
+        sharedPreferences.edit {
+            putString(PREF_SAFEZONE_LAT, geoPoint.latitude.toString())
+            putString(PREF_SAFEZONE_LON, geoPoint.longitude.toString())
+        }
+
+        // Actualizar botón con información de edad
+        val ageInfo = when {
+            ageMinutes == null -> ""
+            ageMinutes < 60 -> " (${ageMinutes}min)"
+            ageMinutes < 1440 -> " (${ageMinutes/60}h)"
+            else -> " (${ageMinutes/1440}d)"
+        }
+
+        binding.buttonZonaSegura.apply {
+            text = "Zona Segura Activa ✓$ageInfo"
+            isEnabled = true
+        }
+
+        val successMessage = if (ageMinutes != null && ageMinutes > 60) {
+            "✅ Zona segura creada con posición de ${ageMinutes/60}h. Configura GPS para datos actuales."
+        } else {
+            "✅ Zona segura establecida correctamente"
+        }
+
+        showSnackbar(successMessage, Snackbar.LENGTH_LONG)
+
+        Log.d(TAG, "✅ Safe zone established successfully for uniqueId: $deviceUniqueId (age: ${ageMinutes}min)")
+    }
+
+// ============ HELPER PARA EXTRAER EDAD DEL ERROR ============
+
+    private fun extractAgeFromError(errorMessage: String?): String {
+        return try {
+            when {
+                errorMessage?.contains("horas") == true -> {
+                    val hours = errorMessage.substringAfter("(").substringBefore(" horas").toIntOrNull()
+                    if (hours != null) " (${hours} horas)" else ""
+                }
+                errorMessage?.contains("hour") == true -> {
+                    val hours = errorMessage.substringAfter("(").substringBefore(" hour").toIntOrNull()
+                    if (hours != null) " (${hours} horas)" else ""
+                }
+                else -> ""
+            }
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+// ============ RESTAURAR BOTÓN DE ZONA SEGURA ============
+
+    private fun restoreSafeZoneButton() {
+        binding.buttonZonaSegura.apply {
+            text = "Establecer Zona Segura"
+            isEnabled = true
+        }
+    }
+    // ✅ FUNCIÓN PRINCIPAL DE LOGOUT
+    private fun logout() {
+        try {
+            Log.d(TAG, "Initiating logout process")
+
+            // 1. Mostrar confirmación al usuario
+            showLogoutConfirmation()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during logout", e)
+            forceLogout()
+        }
+    }
+
+    // ✅ MOSTRAR DIÁLOGO DE CONFIRMACIÓN
+    private fun showLogoutConfirmation() {
+        try {
+            AlertDialog.Builder(requireContext())
+                .setTitle("Cerrar Sesión")
+                .setMessage("¿Estás seguro que deseas cerrar la sesión?")
+                .setPositiveButton("Cerrar Sesión") { _, _ ->
+                    performLogout()
+                }
+                .setNegativeButton("Cancelar") { dialog, _ ->
+                    dialog.dismiss()
+                }
+                .setCancelable(true)
+                .show()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing logout confirmation", e)
+            performLogout() // Logout directo si hay error
+        }
+    }
+
+    // ✅ EJECUTAR LOGOUT
+    private fun performLogout()     {
+        try {
+            Log.d(TAG, "Performing logout")
+
+            // 1. Limpiar sesión guardada
+            clearUserSession()
+
+            // 2. Detener WebSocket si existe
+            stopWebSocket()
+
+            // 3. Mostrar mensaje
+            Toast.makeText(requireContext(), "Sesión cerrada", Toast.LENGTH_SHORT).show()
+
+            // 4. Navegar a FirstFragment
+            navigateToFirstFragment()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error performing logout", e)
+            forceLogout()
+        }
+    }
+
+    // ✅ LIMPIAR SESIÓN GUARDADA
+    private fun clearUserSession() {
+        try {
+            with(sharedPreferences.edit()) {
+                remove("jwt_token")
+                remove("user_email")
+                remove("user_password")
+                remove("session_timestamp")
+                clear() // Limpiar todo
+                apply()
+            }
+            Log.d(TAG, "User session cleared successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing user session", e)
+        }
+    }
+
+    // ✅ DETENER WEBSOCKET
+    private fun stopWebSocket() {
+        try {
+            // Si tienes WebSocket, detenerlo aquí
+            // webSocket?.close()
+            Log.d(TAG, "WebSocket stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping WebSocket", e)
+        }
+    }
+
+    // ✅ NAVEGAR A FIRSTFRAGMENT SEGURO
+    private fun navigateToFirstFragment() {
+        try {
+            if (!isAdded || isDetached || _binding == null) {
+                Log.w(TAG, "Cannot navigate - fragment not in valid state")
+                forceLogout()
+                return
+            }
+
+            val navController = findNavController()
+
+            // ✅ OPCIÓN 1: NAVEGAR CON POPBACKSTACK (RECOMENDADO)
+            if (navController.currentDestination?.id == R.id.SecondFragment) {
+                Log.d(TAG, "Navigating back to FirstFragment")
+
+                // Limpiar el back stack y ir a FirstFragment
+                navController.popBackStack(R.id.FirstFragment, false)
+
+            } else {
+                Log.w(TAG, "Not in SecondFragment, current: ${navController.currentDestination?.id}")
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error navigating to FirstFragment", e)
+            forceLogout()
+        }
+    }
+
+    // ✅ LOGOUT FORZADO EN CASO DE ERROR
+    private fun forceLogout() {
+        try {
+            Log.w(TAG, "Force logout initiated")
+
+            // Limpiar sesión
+            clearUserSession()
+
+            // Reiniciar la actividad completamente
+            val intent = requireActivity().intent
+            requireActivity().finish()
+            startActivity(intent)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in force logout", e)
+
+            // Último recurso: salir de la app
+            requireActivity().finishAffinity()
+        }
+    }
+
+    // ✅ CONFIGURAR BOTÓN DE LOGOUT EN TU VISTA
+    private fun setupLogoutButton() {
+        // Ejemplo de cómo agregar el botón de logout
+        binding.buttonLogout.setOnClickListener {
+            logout()
+        }
+
+        // O si usas un menú:
+        // menuItem.setOnMenuItemClickListener { logout(); true }
+    }
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun performClearOldPositions(deviceUniqueId: String) {
+        Log.d(TAG, "🧹 Clearing old positions for device: $deviceUniqueId")
+
+        // ✅ VALIDACIONES INICIALES
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            Log.e(TAG, "❌ JWT_TOKEN is null")
+            showSnackbar("❌ Token de autenticación faltante", Snackbar.LENGTH_LONG)
+            return
+        }
+
+        if (deviceUniqueId.isBlank()) {
+            Log.e(TAG, "❌ deviceUniqueId is blank")
+            showSnackbar("❌ ID de dispositivo inválido", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        updateStatusUI("🧹 Limpiando posiciones antiguas...", android.R.color.darker_gray)
+
+        // ✅ LIMPIAR EN EL VIEWMODEL PRIMERO (sin crash)
+        try {
+            viewModel.clearOldPositionsAndForceRefresh(deviceUniqueId)
+            Log.d(TAG, "✅ ViewModel cache cleared")
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Error clearing ViewModel cache: ${e.message}")
+            // Continuar de todos modos
+        }
+
+        // ✅ LIMPIAR EN EL SERVIDOR CON DISPATCHER CORRECTO
+        lifecycleScope.launch(Dispatchers.IO) { // ✅ USAR DISPATCHER.IO PARA NETWORK
+            try {
+                Log.d(TAG, "🌐 Sending clear request to server...")
+
+                val json = JSONObject().apply {
+                    put("deviceId", deviceUniqueId.trim()) // ✅ TRIM por seguridad
+                }
+
+                val requestBody = json.toString().toRequestBody("application/json".toMediaType())
+
+                val request = Request.Builder()
+                    .url("https://carefully-arriving-shepherd.ngrok-free.app/api/clear-old-positions")
+                    .post(requestBody)
+                    .addHeader("Authorization", "Bearer $JWT_TOKEN")
+                    .addHeader("Content-Type", "application/json")
+                    .build()
+
+                Log.d(TAG, "📤 Sending request: ${json}")
+
+                // ✅ LLAMADA DE RED EN BACKGROUND THREAD
+                val response = client.newCall(request).execute()
+
+                Log.d(TAG, "📥 Response code: ${response.code}")
+
+                // ✅ CAMBIAR A MAIN THREAD PARA UI UPDATES
+                withContext(Dispatchers.Main) {
+                    if (response.isSuccessful) {
+                        val responseBody = response.body?.string()
+                        Log.d(TAG, "📥 Response body: $responseBody")
+
+                        if (responseBody.isNullOrEmpty()) {
+                            // ✅ MANEJAR RESPUESTA VACÍA
+                            showSnackbar("✅ Cache limpiado (sin respuesta del servidor)", Snackbar.LENGTH_SHORT)
+                            updateStatusUI("✅ Cache limpiado", android.R.color.holo_green_dark)
+                        } else {
+                            try {
+                                val responseJson = JSONObject(responseBody)
+                                val message = responseJson.optString("message", "Cache limpiado")
+                                val recentPositions = responseJson.optInt("recentPositionsFound", 0)
+
+                                // ✅ INFORMACIÓN ADICIONAL DEL SERVIDOR (OPCIONAL)
+                                val latestAge = responseJson.optInt("latestPositionAge", -1)
+                                val latestQuality = responseJson.optString("latestPositionQuality", "unknown")
+
+                                val detailedMessage = buildString {
+                                    append("✅ $message")
+                                    if (recentPositions > 0) {
+                                        append(" ($recentPositions recientes)")
+                                    }
+
+                                    if (latestAge >= 0) {
+                                        append(" - Última: ${latestAge}min")
+
+                                        val qualityEmoji = when (latestQuality) {
+                                            "excellent" -> "🟢"
+                                            "good" -> "🟡"
+                                            "acceptable" -> "🟠"
+                                            else -> "🔵"
+                                        }
+                                        append(" $qualityEmoji")
+                                    }
+                                }
+
+                                showSnackbar(detailedMessage, Snackbar.LENGTH_LONG)
+                                updateStatusUI("✅ Cache limpiado - esperando datos frescos", android.R.color.holo_green_dark)
+
+                            } catch (jsonError: Exception) {
+                                Log.w(TAG, "⚠️ Error parsing JSON response: ${jsonError.message}")
+                                // ✅ SI HAY ERROR EN JSON, PERO RESPUESTA EXITOSA
+                                showSnackbar("✅ Cache limpiado correctamente", Snackbar.LENGTH_SHORT)
+                                updateStatusUI("✅ Cache limpiado", android.R.color.holo_green_dark)
+                            }
+                        }
+
+                    } else {
+                        // ✅ MANEJAR ERRORES HTTP ESPECÍFICOS
+                        val errorBody = response.body?.string()
+                        Log.e(TAG, "❌ Server error: ${response.code} - $errorBody")
+
+                        val errorMessage = when (response.code) {
+                            401 -> "Token expirado. Reinicia sesión."
+                            403 -> "Sin permisos para limpiar cache"
+                            404 -> "Dispositivo no encontrado"
+                            500 -> "Error interno del servidor"
+                            else -> "Error del servidor (${response.code})"
+                        }
+
+                        showSnackbar("❌ $errorMessage", Snackbar.LENGTH_LONG)
+                        updateStatusUI("❌ Error limpiando cache", android.R.color.holo_red_dark)
+
+                        if (response.code == 401) {
+                            handleUnauthorizedError()
+                        }
+                    }
+                }
+
+                // ✅ FORZAR NUEVA OBTENCIÓN DESPUÉS DE LIMPIAR (EN BACKGROUND)
+                delay(2000)
+                withContext(Dispatchers.Main) {
+                    try {
+                        fetchInitialPosition()
+                    } catch (fetchError: Exception) {
+                        Log.w(TAG, "⚠️ Error fetching initial position after clear: ${fetchError.message}")
+                        showSnackbar("⚠️ Cache limpiado, pero error obteniendo nueva posición", Snackbar.LENGTH_LONG)
+                    }
+                }
+
+            } catch (networkError: Exception) {
+                Log.e(TAG, "❌ Network error clearing old positions: ${networkError.message}", networkError)
+
+                // ✅ CAMBIAR A MAIN THREAD PARA UI UPDATES
+                withContext(Dispatchers.Main) {
+                    val errorMessage = when {
+                        networkError.message?.contains("timeout") == true -> "Timeout - Servidor no responde"
+                        networkError.message?.contains("connect") == true -> "Error de conexión"
+                        networkError.message?.contains("ssl") == true -> "Error de certificado SSL"
+                        networkError is java.net.UnknownHostException -> "Sin conexión a internet"
+                        else -> "Error de red: ${networkError.message}"
+                    }
+
+                    showSnackbar("❌ $errorMessage", Snackbar.LENGTH_LONG)
+                    updateStatusUI("❌ Error de conexión", android.R.color.holo_red_dark)
+
+                    // ✅ OFRECER REINTENTAR
+                    handler.postDelayed({
+                        if (isAdded) {
+                            MaterialAlertDialogBuilder(requireContext())
+                                .setTitle("❌ Error de Conexión")
+                                .setMessage("No se pudo conectar al servidor. ¿Quieres intentar nuevamente?")
+                                .setPositiveButton("🔄 Reintentar") { _, _ ->
+                                    performClearOldPositions(deviceUniqueId)
+                                }
+                                .setNegativeButton("❌ Cancelar", null)
+                                .show()
+                        }
+                    }, 1000)
+                }
+            }
+        }
+    }
+
+    // ✅ TAMBIÉN AGREGAR ESTA VERSIÓN MEJORADA DE performForceRefresh
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun performForceRefresh(deviceUniqueId: String) {
+        Log.d(TAG, "🔄 Force refreshing position for device: $deviceUniqueId")
+
+        updateStatusUI("🔄 Forzando actualización...", android.R.color.darker_gray)
+
+        // ✅ USAR DISPATCHER.IO PARA CUALQUIER OPERACIÓN DE RED POTENCIAL
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                // ✅ OBTENER POSICIÓN FRESCA DEL SERVIDOR
+                val position = viewModel.getLastPosition(deviceUniqueId)
+
+                // ✅ CAMBIAR A MAIN THREAD PARA UI
+                withContext(Dispatchers.Main) {
+                    val geoPoint = GeoPoint(position.latitude, position.longitude)
+
+                    // ✅ ACTUALIZAR INMEDIATAMENTE
+                    updateVehiclePosition(deviceUniqueId.hashCode(), geoPoint)
+
+                    // ✅ MOSTRAR INFORMACIÓN DETALLADA CON VERIFICACIÓN SEGURA
+                    val ageInfo = when {
+                        position.age != null && position.age > 0 -> " (${position.age} min)"
+                        position.quality != null -> " (${position.quality})"
+                        else -> ""
+                    }
+
+                    val qualityEmoji = when (position.quality) {
+                        "excellent" -> "🟢"
+                        "good" -> "🟡"
+                        "acceptable" -> "🟠"
+                        "too_old" -> "🔴"
+                        else -> "🔵"
+                    }
+
+                    updateStatusUI("✅ Posición actualizada forzadamente$ageInfo $qualityEmoji", android.R.color.holo_green_dark)
+                    showSnackbar("✅ Posición refrescada correctamente$ageInfo", Snackbar.LENGTH_SHORT)
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error force refreshing: ${e.message}")
+
+                // ✅ CAMBIAR A MAIN THREAD PARA UI
+                withContext(Dispatchers.Main) {
+                    updateStatusUI("❌ Error en actualización forzada", android.R.color.holo_red_dark)
+
+                    if (e.message?.contains("posiciones recientes") == true) {
+                        showSnackbar("⚠️ ${e.message}", Snackbar.LENGTH_LONG)
+
+                        // ✅ OFRECER LIMPIAR POSICIONES ANTIGUAS
+                        handler.postDelayed({
+                            if (isAdded) {
+                                MaterialAlertDialogBuilder(requireContext())
+                                    .setTitle("⚠️ No hay posiciones recientes")
+                                    .setMessage("¿Quieres limpiar las posiciones antiguas y esperar datos frescos del GPS?")
+                                    .setPositiveButton("🧹 Sí, Limpiar") { _, _ ->
+                                        performClearOldPositions(deviceUniqueId)
+                                    }
+                                    .setNegativeButton("❌ No", null)
+                                    .show()
+                            }
+                        }, 1000)
+                    } else {
+                        showSnackbar("❌ Error: ${e.message}", Snackbar.LENGTH_LONG)
+                    }
+                }
+            }
+        }
+    }
+    // ✅ FUNCIÓN AUXILIAR PARA VALIDAR ESTADO DEL FRAGMENT
+    private fun isFragmentValid(): Boolean {
+        return isAdded && !isDetached && _binding != null && isResumed
+    }
+
+    // ✅ VERSIÓN MEJORADA DE showSnackbar CON VALIDACIÓN
+    private fun showSnackbar(message: String, duration: Int) {
+        if (isFragmentValid()) {
+            try {
+                Snackbar.make(binding.root, message, duration).show()
+                Log.d(TAG, "📱 Snackbar shown: $message")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error showing snackbar: ${e.message}")
+                // Fallback a Toast
+                try {
+                    Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show()
+                } catch (toastError: Exception) {
+                    Log.e(TAG, "❌ Error showing toast: ${toastError.message}")
+                }
+            }
+        } else {
+            Log.w(TAG, "⚠️ Fragment not valid for snackbar, message was: $message")
+        }
+    }
+    // ✅ VERSIÓN MEJORADA DE updateStatusUI CON VALIDACIÓN
+    private fun updateStatusUI(message: String, colorResId: Int? = null) {
+        if (!isFragmentValid()) {
+            Log.w(TAG, "Fragment not ready for UI update, skipping: $message")
+            return
+        }
+
+        try {
+            binding.textDeviceStatus.text = message
+            binding.textDeviceStatus.visibility = View.VISIBLE
+
+            colorResId?.let {
+                binding.textDeviceStatus.setTextColor(
+                    ContextCompat.getColor(requireContext(), it)
+                )
+            }
+
+            // ✅ AGREGAR TIMESTAMP AL STATUS SOLO SI NO ES ERROR
+            if (!message.contains("❌") && !message.contains("🔄")) {
+                val timeString = getCurrentTime()
+                binding.textDeviceStatus.text = "$message ($timeString)"
+            }
+
+            Log.d(TAG, "✅ Status updated: $message")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error updating status UI: ${e.message}")
+        }
+    }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @RequiresApi(Build.VERSION_CODES.O)
@@ -2289,6 +2925,12 @@ class SecondFragment : Fragment() {
 
 
         Log.d(TAG, "✅ SafeZone receiver registrado")
+        // Verificar que la sesión sigue válida
+        val token = sharedPreferences.getString("jwt_token", null)
+        if (token == null) {
+            Log.w(TAG, "No token found on resume, redirecting to login")
+            navigateToFirstFragment()
+        }
     }
 
     override fun onPause() {
