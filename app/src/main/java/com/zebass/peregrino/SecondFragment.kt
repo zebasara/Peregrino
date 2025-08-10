@@ -24,15 +24,18 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AlertDialog
+import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.fragment.app.Fragment
@@ -64,6 +67,8 @@ import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
 import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay
+import java.util.Timer
+import java.util.TimerTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -301,6 +306,8 @@ class SecondFragment : Fragment() {
         requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner) {
             logout() // Logout cuando presione back
         }
+        // En SecondFragment, agrega este botón de test
+
     }
 
     private fun clearCorruptedCaches() {
@@ -510,6 +517,21 @@ class SecondFragment : Fragment() {
             buttonAssociateDevice.setOnClickListener { showAssociateDeviceDialog() }
             buttonDeviceStatus.setOnClickListener { checkDeviceStatus() }
             buttonShowConfig.setOnClickListener { showTraccarClientConfig() }
+            binding.buttonTestWS.setOnClickListener {
+                Log.d(TAG, "🧪 Testing WebSocket connection...")
+                if (webSocket != null) {
+                    val testMessage = JSONObject().apply {
+                        put("type", "TEST_CONNECTION")
+                        put("deviceId", getDeviceUniqueId())
+                        put("timestamp", System.currentTimeMillis())
+                    }
+                    webSocket?.send(testMessage.toString())
+                    showSnackbar("📤 Test message sent", Snackbar.LENGTH_SHORT)
+                } else {
+                    showSnackbar("❌ WebSocket not connected", Snackbar.LENGTH_SHORT)
+                    setupWebSocket() // Intentar reconectar
+                }
+            }
 
             // ✅ NUEVO: Long press para limpiar posiciones antiguas
             buttonDeviceStatus.setOnLongClickListener {
@@ -662,6 +684,55 @@ class SecondFragment : Fragment() {
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to refresh token: ${e.message}")
                 forceLogout()
+            }
+        }
+    }
+    private fun showSnackbar(message: String, duration: Int) {
+        if (!isFragmentValid()) {
+            Log.w(TAG, "⚠️ Fragment not valid for snackbar, message was: $message")
+            // Fallback a Toast solo si es absolutamente necesario
+            try {
+                Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show()
+            } catch (toastError: Exception) {
+                Log.e(TAG, "❌ Error showing toast: ${toastError.message}")
+            }
+            return
+        }
+
+        try {
+            // Crear el Snackbar en el CoordinatorLayout raíz
+            val snackbar = Snackbar.make(
+                requireActivity().findViewById(R.id.coordinator_layout),
+                message,
+                duration
+            )
+
+            // Ajustar la elevación para que esté por encima de todos los elementos
+            snackbar.view.elevation = 30f // Elevación alta para superar CardViews (16dp) y FABs (8dp)
+
+            // Opcional: Personalizar el diseño del Snackbar para mejor visibilidad
+            snackbar.view.setBackgroundResource(R.drawable.snackbar_background)
+            val textView = snackbar.view.findViewById<TextView>(com.google.android.material.R.id.snackbar_text)
+            textView.setTextColor(ContextCompat.getColor(requireContext(), android.R.color.white))
+            textView.textSize = 14f
+            textView.maxLines = 3
+
+            // Ajustar márgenes para que no se superponga con el panel inferior
+            val params = snackbar.view.layoutParams as CoordinatorLayout.LayoutParams
+            params.setMargins(16, 16, 16, 160) // Margen inferior para evitar el panel inferior
+            params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            snackbar.view.layoutParams = params
+
+            // Mostrar el Snackbar
+            snackbar.show()
+            Log.d(TAG, "📱 Snackbar shown with high elevation: $message")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error showing snackbar: ${e.message}")
+            // Fallback a Toast
+            try {
+                Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show()
+            } catch (toastError: Exception) {
+                Log.e(TAG, "❌ Error showing toast: ${toastError.message}")
             }
         }
     }
@@ -1010,47 +1081,6 @@ class SecondFragment : Fragment() {
             }
         }
     }
-
-
-
-    // Fix en setupWebSocket con mejor manejo de errores
-    private fun setupWebSocket() {
-        if (JWT_TOKEN.isNullOrEmpty()) {
-            Log.e(TAG, "❌ JWT_TOKEN is null or empty")
-            showSnackbar("❌ Token de autenticación faltante. Inicia sesión nuevamente.", Snackbar.LENGTH_LONG)
-            handleUnauthorizedError()
-            return
-        }
-
-        val deviceUniqueId = getDeviceUniqueId()
-        if (deviceUniqueId == null) {
-            Log.e(TAG, "❌ No device uniqueId for WebSocket connection")
-            updateStatusUI("⚠️ No hay dispositivo asociado", android.R.color.holo_orange_dark)
-            return
-        }
-
-        Log.d(TAG, "🔗 Setting up WebSocket for device uniqueId: $deviceUniqueId")
-
-        // Cancel any existing reconnect
-        cancelReconnect()
-
-        // Close existing connection
-        webSocket?.close(1000, "Reconnecting")
-        webSocket = null
-
-        val wsUrl = "wss://carefully-arriving-shepherd.ngrok-free.app/ws?token=$JWT_TOKEN"
-        Log.d(TAG, "🔗 WebSocket URL: ${wsUrl.replace(JWT_TOKEN ?: "", "***TOKEN***")}")
-
-        val request = Request.Builder()
-            .url(wsUrl)
-            .header("Origin", "https://carefully-arriving-shepherd.ngrok-free.app")
-            .build()
-
-        updateStatusUI("🔄 Conectando WebSocket...", android.R.color.darker_gray)
-        webSocket = client.newWebSocket(request, createWebSocketListener(deviceUniqueId))
-    }
-
-
     // Fix en handlePositionUpdate con mejor logging
     // REEMPLAZAR la función handlePositionUpdate
     @RequiresApi(Build.VERSION_CODES.O)
@@ -1119,17 +1149,6 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "❌ Error handling position update: ${e.message}", e)
             Log.e(TAG, "❌ Raw JSON: $json")
         }
-    }
-
-    private fun scheduleReconnect() {
-        cancelReconnect()
-        reconnectRunnable = Runnable {
-            if (shouldReconnect.get() && isAdded) {
-                Log.d(TAG, "Reconectando WebSocket...")
-                setupWebSocket()
-            }
-        }
-        handler.postDelayed(reconnectRunnable!!, RECONNECT_DELAY)
     }
 
     private fun cancelReconnect() {
@@ -1229,18 +1248,19 @@ class SecondFragment : Fragment() {
 
     private fun checkSafeZone(position: GeoPoint, deviceId: Int) {
         safeZoneCenter?.let { center ->
-            // Usar distancia más precisa
             val distance = calculateAccurateDistance(center, position)
-
             Log.d(TAG, "📏 Distance to safe zone: ${String.format("%.2f", distance)}m")
 
             if (distance > GEOFENCE_RADIUS) {
+                // ✅ VEHÍCULO FUERA - ACTIVAR ALARMA
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     triggerAlarm(deviceId, distance)
                 }
                 Log.d(TAG, "🚨 Vehicle outside safe zone: ${String.format("%.1f", distance)}m")
             } else {
-                Log.d(TAG, "✅ Vehicle inside safe zone: ${String.format("%.1f", distance)}m")
+                // ✅ VEHÍCULO DENTRO - DETENER ALARMA SIEMPRE
+                stopAlarmIfActive()
+                Log.d(TAG, "✅ Vehicle inside safe zone: ${String.format("%.1f", distance)}m - Alarm stopped")
             }
         }
     }
@@ -1271,8 +1291,15 @@ class SecondFragment : Fragment() {
         )
     }
     private fun stopAlarmIfActive() {
-        if (::alertManager.isInitialized) {
-            alertManager.stopAlert()
+        try {
+            if (::alertManager.isInitialized) {
+                alertManager.stopAlert()
+                Log.d(TAG, "🔇 AlertManager stopped successfully")
+            } else {
+                Log.w(TAG, "⚠️ AlertManager not initialized")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error stopping alarm: ${e.message}")
         }
     }
 
@@ -1660,88 +1687,6 @@ class SecondFragment : Fragment() {
         }
     }
     // Fix en createWebSocketListener con mejor manejo de mensajes
-    private fun createWebSocketListener(deviceUniqueId: String) = object : WebSocketListener() {
-        override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.d(TAG, "🔗 WebSocket conectado!")
-
-            // Enviar PING inmediato para verificar
-            val pingMessage = JSONObject().apply {
-                put("type", "PING")
-                put("timestamp", System.currentTimeMillis())
-            }
-
-            webSocket.send(pingMessage.toString())
-            Log.d(TAG, "📤 PING enviado al servidor")
-        }
-
-        @RequiresApi(Build.VERSION_CODES.O)
-        override fun onMessage(webSocket: WebSocket, text: String) {
-            Log.d(TAG, "📨 WebSocket message received: ${text.take(100)}...")
-
-            try {
-                val json = JSONObject(text)
-                val type = json.getString("type")
-
-                Log.d(TAG, "📋 Message type: $type")
-
-                when (type) {
-                    "POSITION_UPDATE" -> {
-                        Log.d(TAG, "📍 Processing position update")
-                        handlePositionUpdate(json, deviceUniqueId)
-                    }
-                    "CONNECTION_CONFIRMED" -> {
-                        Log.d(TAG, "✅ Connection confirmed")
-                        lifecycleScope.launch(Dispatchers.Main) {
-                            showSnackbar("✅ Conectado y suscrito", Snackbar.LENGTH_SHORT)
-                        }
-                    }
-                    "SUBSCRIBE_DEVICE" -> {
-                        Log.d(TAG, "🔔 Device subscription confirmed")
-                    }
-                    "ERROR" -> {
-                        val errorMsg = json.optString("message", "Error desconocido")
-                        Log.e(TAG, "❌ WebSocket error: $errorMsg")
-                        lifecycleScope.launch(Dispatchers.Main) {
-                            showSnackbar("❌ Error: $errorMsg", Snackbar.LENGTH_LONG)
-                        }
-                    }
-                    else -> {
-                        Log.d(TAG, "❓ Unknown message type: $type")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Error processing WebSocket message: ${e.message}", e)
-                Log.e(TAG, "❌ Raw message: $text")
-            }
-        }
-
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.e(TAG, "❌ WebSocket failure: ${t.message}")
-            Log.e(TAG, "❌ Response: ${response?.code} - ${response?.message}")
-
-            lifecycleScope.launch(Dispatchers.Main) {
-                updateStatusUI("🔴 Conexión perdida", android.R.color.holo_red_dark)
-                showSnackbar("❌ Conexión perdida - Reintentando...", Snackbar.LENGTH_SHORT)
-            }
-
-            if (shouldReconnect.get() && isAdded) {
-                scheduleReconnect()
-            }
-        }
-
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Log.d(TAG, "🔐 WebSocket cerrado: $code - $reason")
-
-            lifecycleScope.launch(Dispatchers.Main) {
-                updateStatusUI("🔴 Desconectado", android.R.color.holo_red_dark)
-            }
-
-            if (shouldReconnect.get() && isAdded && code != 1000) {
-                scheduleReconnect()
-            }
-        }
-    }
-
     @RequiresApi(Build.VERSION_CODES.O)
     private fun showTraccarClientConfig() {
         if (JWT_TOKEN.isNullOrEmpty()) {
@@ -2600,6 +2545,7 @@ class SecondFragment : Fragment() {
         // O si usas un menú:
         // menuItem.setOnMenuItemClickListener { logout(); true }
     }
+
     @RequiresApi(Build.VERSION_CODES.O)
     private fun performClearOldPositions(deviceUniqueId: String) {
         Log.d(TAG, "🧹 Clearing old positions for device: $deviceUniqueId")
@@ -2843,26 +2789,6 @@ class SecondFragment : Fragment() {
     private fun isFragmentValid(): Boolean {
         return isAdded && !isDetached && _binding != null && isResumed
     }
-
-    // ✅ VERSIÓN MEJORADA DE showSnackbar CON VALIDACIÓN
-    private fun showSnackbar(message: String, duration: Int) {
-        if (isFragmentValid()) {
-            try {
-                Snackbar.make(binding.root, message, duration).show()
-                Log.d(TAG, "📱 Snackbar shown: $message")
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Error showing snackbar: ${e.message}")
-                // Fallback a Toast
-                try {
-                    Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show()
-                } catch (toastError: Exception) {
-                    Log.e(TAG, "❌ Error showing toast: ${toastError.message}")
-                }
-            }
-        } else {
-            Log.w(TAG, "⚠️ Fragment not valid for snackbar, message was: $message")
-        }
-    }
     // ✅ VERSIÓN MEJORADA DE updateStatusUI CON VALIDACIÓN
     private fun updateStatusUI(message: String, colorResId: Int? = null) {
         if (!isFragmentValid()) {
@@ -2891,7 +2817,217 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "❌ Error updating status UI: ${e.message}")
         }
     }
+    // ✅ REEMPLAZAR setupWebSocket en SecondFragment con esta versión ultra-estable
 
+    private fun setupWebSocket() {
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            Log.e(TAG, "❌ JWT_TOKEN is null or empty")
+            showSnackbar("❌ Token de autenticación faltante.", Snackbar.LENGTH_LONG)
+            return
+        }
+
+        val deviceUniqueId = getDeviceUniqueId()
+        if (deviceUniqueId == null) {
+            Log.e(TAG, "❌ No device uniqueId for WebSocket connection")
+            updateStatusUI("⚠️ No hay dispositivo asociado", android.R.color.holo_orange_dark)
+            return
+        }
+
+        Log.d(TAG, "🔗 Setting up ULTRA-STABLE WebSocket for device uniqueId: $deviceUniqueId")
+
+        // ✅ CANCELAR RECONEXIONES PREVIAS
+        cancelReconnect()
+
+        // ✅ CERRAR CONEXIÓN EXISTENTE LIMPIAMENTE
+        webSocket?.close(1000, "Reconnecting")
+        webSocket = null
+
+        val wsUrl = "wss://carefully-arriving-shepherd.ngrok-free.app/ws?token=$JWT_TOKEN"
+        Log.d(TAG, "🔗 Connecting to WebSocket...")
+
+        // ✅ CLIENT MEJORADO CON KEEPALIVE AGRESIVO
+        val wsClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS) // ✅ SIN TIMEOUT DE LECTURA
+            .writeTimeout(10, TimeUnit.SECONDS)
+            .pingInterval(15, TimeUnit.SECONDS) // ✅ PING CADA 15 SEGUNDOS
+            .retryOnConnectionFailure(true)
+            .build()
+
+        val request = Request.Builder()
+            .url(wsUrl)
+            .header("Origin", "https://carefully-arriving-shepherd.ngrok-free.app")
+            .header("User-Agent", "PeregrinoGPS-Android/1.0")
+            .header("Connection", "Upgrade") // ✅ FORZAR UPGRADE
+            .header("Upgrade", "websocket")
+            .build()
+
+        updateStatusUI("🔄 Conectando WebSocket ultra-estable...", android.R.color.darker_gray)
+
+        webSocket = wsClient.newWebSocket(request, object : WebSocketListener() {
+            private var lastPongTime = System.currentTimeMillis()
+            private var manualPingTimer: Timer? = null
+
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.d(TAG, "🔗 WebSocket conectado exitosamente!")
+                lastPongTime = System.currentTimeMillis()
+
+                lifecycleScope.launch(Dispatchers.Main) {
+                    updateStatusUI("✅ WebSocket conectado", android.R.color.holo_green_dark)
+                    showSnackbar("✅ Conectado al servidor en tiempo real", Snackbar.LENGTH_SHORT)
+                }
+
+                // ✅ PING INICIAL INMEDIATO
+                val pingMessage = JSONObject().apply {
+                    put("type", "PING")
+                    put("deviceId", deviceUniqueId)
+                    put("timestamp", System.currentTimeMillis())
+                }
+
+                webSocket.send(pingMessage.toString())
+                Log.d(TAG, "📤 Initial PING sent to server")
+
+                // ✅ TIMER MANUAL DE PING COMO BACKUP
+                startManualPingTimer(webSocket, deviceUniqueId)
+            }
+
+            @RequiresApi(Build.VERSION_CODES.O)
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                Log.d(TAG, "📨 WebSocket message received: ${text.take(200)}...")
+
+                try {
+                    val json = JSONObject(text)
+                    val type = json.getString("type")
+
+                    when (type) {
+                        "POSITION_UPDATE" -> {
+                            Log.d(TAG, "📍 Processing position update")
+                            handlePositionUpdate(json, deviceUniqueId)
+                        }
+                        "CONNECTION_CONFIRMED" -> {
+                            Log.d(TAG, "✅ Connection confirmed by server")
+                            lifecycleScope.launch(Dispatchers.Main) {
+                                showSnackbar("✅ Conectado y suscrito correctamente", Snackbar.LENGTH_SHORT)
+                                updateStatusUI("✅ Suscrito a actualizaciones", android.R.color.holo_green_dark)
+                            }
+                        }
+                        "SUBSCRIBE_DEVICE" -> {
+                            val deviceId = json.optString("deviceId", "")
+                            Log.d(TAG, "🔔 Device subscription confirmed: $deviceId")
+                        }
+                        "SUBSCRIPTION_COMPLETE" -> {
+                            Log.d(TAG, "✅ All subscriptions completed")
+                        }
+                        "PONG" -> {
+                            lastPongTime = System.currentTimeMillis()
+                            Log.d(TAG, "💓 Pong received from server - connection healthy")
+                        }
+                        "ERROR" -> {
+                            val errorMsg = json.optString("message", "Error desconocido")
+                            Log.e(TAG, "❌ WebSocket error: $errorMsg")
+                            lifecycleScope.launch(Dispatchers.Main) {
+                                showSnackbar("❌ Error del servidor: $errorMsg", Snackbar.LENGTH_LONG)
+                            }
+                        }
+                        else -> {
+                            Log.d(TAG, "❓ Unknown message type: $type")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Error processing WebSocket message: ${e.message}", e)
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "❌ WebSocket failure: ${t.message}")
+                Log.e(TAG, "❌ Response: ${response?.code} - ${response?.message}")
+
+                // ✅ DETENER PING TIMER
+                manualPingTimer?.cancel()
+
+                lifecycleScope.launch(Dispatchers.Main) {
+                    updateStatusUI("🔴 Conexión perdida - Reintentando...", android.R.color.holo_red_dark)
+                    showSnackbar("❌ Conexión perdida - Reintentando en 5s...", Snackbar.LENGTH_SHORT)
+                }
+
+                // ✅ RECONEXIÓN INTELIGENTE CON BACKOFF
+                if (shouldReconnect.get() && isAdded) {
+                    val timeSinceLastPong = System.currentTimeMillis() - lastPongTime
+                    Log.d(TAG, "🔄 Last pong was ${timeSinceLastPong}ms ago")
+                    scheduleIntelligentReconnect()
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "🔐 WebSocket cerrado: code=$code, reason=$reason")
+
+                // ✅ DETENER PING TIMER
+                manualPingTimer?.cancel()
+
+                lifecycleScope.launch(Dispatchers.Main) {
+                    updateStatusUI("🔴 Desconectado del servidor", android.R.color.holo_red_dark)
+                }
+
+                if (shouldReconnect.get() && isAdded && code != 1000) {
+                    Log.d(TAG, "🔄 Scheduling reconnect due to unexpected close")
+                    scheduleIntelligentReconnect()
+                }
+            }
+
+            // ✅ FUNCIÓN PARA PING MANUAL AGRESIVO
+            private fun startManualPingTimer(ws: WebSocket, deviceId: String) {
+                manualPingTimer?.cancel()
+
+                manualPingTimer = Timer().apply {
+                    scheduleAtFixedRate(object : TimerTask() {
+                        override fun run() {
+                            try {
+                                if (ws.hashCode() == webSocket?.hashCode()) { // ✅ VERIFICAR QUE SEA LA MISMA CONEXIÓN
+                                    val timeSinceLastPong = System.currentTimeMillis() - lastPongTime
+
+                                    if (timeSinceLastPong > 45000) { // ✅ 45 segundos sin PONG = reconectar
+                                        Log.w(TAG, "⚠️ No pong for ${timeSinceLastPong}ms - forcing reconnect")
+                                        ws.close(1000, "Ping timeout")
+                                        return
+                                    }
+
+                                    val pingMessage = JSONObject().apply {
+                                        put("type", "PING")
+                                        put("deviceId", deviceId)
+                                        put("timestamp", System.currentTimeMillis())
+                                        put("keepalive", true)
+                                    }
+
+                                    ws.send(pingMessage.toString())
+                                    Log.d(TAG, "💓 Manual keepalive ping sent")
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "❌ Error in manual ping: ${e.message}")
+                            }
+                        }
+                    }, 20000, 20000) // ✅ PING CADA 20 SEGUNDOS
+                }
+            }
+        })
+    }
+
+    // ✅ RECONEXIÓN INTELIGENTE CON BACKOFF EXPONENCIAL
+    private fun scheduleIntelligentReconnect() {
+        cancelReconnect()
+
+        val baseDelay = 3000L
+        val jitter = (Math.random() * 2000).toLong()
+        val delay = baseDelay + jitter
+
+        reconnectRunnable = Runnable {
+            if (shouldReconnect.get() && isAdded && !isDetached) {
+                Log.d(TAG, "🔄 Attempting intelligent WebSocket reconnection...")
+                setupWebSocket()
+            }
+        }
+        handler.postDelayed(reconnectRunnable!!, delay)
+        Log.d(TAG, "⏰ Intelligent reconnect scheduled in ${delay}ms")
+    }
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onResume() {
@@ -2993,7 +3129,13 @@ class SecondFragment : Fragment() {
         deviceInfoCache.clear()
         safeZoneCache.clear()
         lastPositionCache.clear()
-
+        // ✅ SOLO DETENER ALARMA SI REALMENTE SALIMOS DE LA APP
+        if (requireActivity().isFinishing) {
+            stopAlarmIfActive()
+            Log.d(TAG, "🔇 Alarma detenida: app cerrándose")
+        } else {
+            Log.d(TAG, "🎵 Alarma continúa: solo navegación interna")
+        }
         _binding = null
         Log.d(TAG, "Vista del fragment destruida")
     }

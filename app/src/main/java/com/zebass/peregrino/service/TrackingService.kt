@@ -57,7 +57,7 @@ class TrackingService : Service() {
     private var webSocket: WebSocket? = null
     private var isServiceRunning = false
     private var alertManager: AlertManager? = null
-
+    private var alarmReceiver: BroadcastReceiver? = null
     // ✅ DATOS DEL DISPOSITIVO
     private var deviceUniqueId: String? = null
     private var jwtToken: String? = null
@@ -95,50 +95,6 @@ class TrackingService : Service() {
 
         // ✅ CARGAR ZONA SEGURA
         loadSafeZone()
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "📱 TrackingService iniciado")
-
-        // ✅ MANEJAR ACCIONES ESPECIALES DE ALARMA
-        when (intent?.action) {
-            ACTION_STOP_ALARM -> {
-                Log.d(TAG, "🔇 Deteniendo alarma por acción del usuario")
-                stopAlarm()
-                return START_STICKY
-            }
-            ACTION_DISABLE_SAFEZONE -> {
-                Log.d(TAG, "🛡️ Desactivando zona segura por acción del usuario")
-                disableSafeZone()
-                return START_STICKY
-            }
-            ACTION_EMERGENCY_DISABLE -> {
-                Log.d(TAG, "🚨 Desactivación de emergencia - deteniendo todo")
-                emergencyDisable()
-                return START_STICKY
-            }
-        }
-
-        // ✅ OBTENER DATOS DEL INTENT
-        deviceUniqueId = intent?.getStringExtra("deviceUniqueId")
-        jwtToken = intent?.getStringExtra("jwtToken")
-
-        if (deviceUniqueId == null || jwtToken == null) {
-            Log.e(TAG, "❌ Faltan datos críticos - deteniendo servicio")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        Log.d(TAG, "✅ Datos recibidos: deviceUniqueId=$deviceUniqueId")
-
-        if (!isServiceRunning) {
-            startForegroundService()
-            startLocationTracking()
-            setupWebSocket()
-            isServiceRunning = true
-        }
-
-        return START_STICKY // ✅ REINICIO AUTOMÁTICO
     }
 
     private fun createNotificationChannel() {
@@ -495,26 +451,6 @@ class TrackingService : Service() {
         Log.d(TAG, "📤 Enviando ubicación al servidor: $position")
     }
 
-    // ✅ REGISTRO DE BROADCAST RECEIVER
-    @SuppressLint("UnspecifiedRegisterReceiverFlag")
-    private fun registerAlarmReceiver() {
-        val filter = IntentFilter().apply {
-            addAction("com.peregrino.STOP_ALARM_BROADCAST")
-            addAction("com.peregrino.DISABLE_SAFEZONE_BROADCAST")
-        }
-
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                when (intent?.action) {
-                    "com.peregrino.STOP_ALARM_BROADCAST" -> stopAlarm()
-                    "com.peregrino.DISABLE_SAFEZONE_BROADCAST" -> disableSafeZone()
-                }
-            }
-        }
-
-        registerReceiver(receiver, filter)
-    }
-
     // ✅ UTILIDADES
     private fun calculateDistance(point1: GeoPoint, point2: GeoPoint): Double {
         val results = FloatArray(1)
@@ -532,14 +468,127 @@ class TrackingService : Service() {
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
     }
+    // ✅ REGISTRO DE BROADCAST RECEIVER CORREGIDO
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun registerAlarmReceiver() {
+        if (alarmReceiver != null) {
+            Log.w(TAG, "Alarm receiver already registered")
+            return
+        }
+
+        val filter = IntentFilter().apply {
+            addAction("com.peregrino.STOP_ALARM_BROADCAST")
+            addAction("com.peregrino.DISABLE_SAFEZONE_BROADCAST")
+        }
+
+        alarmReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                Log.d(TAG, "📨 Broadcast received: ${intent?.action}")
+                when (intent?.action) {
+                    "com.peregrino.STOP_ALARM_BROADCAST" -> {
+                        Log.d(TAG, "🔇 Stopping alarm via broadcast")
+                        stopAlarm()
+                    }
+                    "com.peregrino.DISABLE_SAFEZONE_BROADCAST" -> {
+                        Log.d(TAG, "🛡️ Disabling safezone via broadcast")
+                        disableSafeZone()
+                    }
+                }
+            }
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(alarmReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(alarmReceiver, filter)
+            }
+            Log.d(TAG, "✅ Alarm receiver registered successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error registering alarm receiver: ${e.message}")
+            alarmReceiver = null
+        }
+    }
+
+    // ✅ FUNCIÓN PARA DESREGISTRAR RECEIVER SAFELY
+    private fun unregisterAlarmReceiver() {
+        alarmReceiver?.let { receiver ->
+            try {
+                unregisterReceiver(receiver)
+                Log.d(TAG, "✅ Alarm receiver unregistered successfully")
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Receiver already unregistered: ${e.message}")
+            } finally {
+                alarmReceiver = null
+            }
+        }
+    }
+    // ✅ TAMBIÉN AGREGAR EN onStartCommand PARA EVITAR DOBLE REGISTRO
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "📱 TrackingService onStartCommand")
+
+        // ✅ MANEJAR ACCIONES ESPECIALES PRIMERO
+        when (intent?.action) {
+            ACTION_STOP_ALARM -> {
+                Log.d(TAG, "🔇 Deteniendo alarma por acción del usuario")
+                stopAlarm()
+                return START_STICKY
+            }
+            ACTION_DISABLE_SAFEZONE -> {
+                Log.d(TAG, "🛡️ Desactivando zona segura por acción del usuario")
+                disableSafeZone()
+                return START_STICKY
+            }
+            ACTION_EMERGENCY_DISABLE -> {
+                Log.d(TAG, "🚨 Desactivación de emergencia - deteniendo todo")
+                emergencyDisable()
+                return START_STICKY
+            }
+        }
+
+        // ✅ OBTENER DATOS DEL INTENT
+        deviceUniqueId = intent?.getStringExtra("deviceUniqueId")
+        jwtToken = intent?.getStringExtra("jwtToken")
+
+        if (deviceUniqueId == null || jwtToken == null) {
+            Log.e(TAG, "❌ Faltan datos críticos - deteniendo servicio")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        Log.d(TAG, "✅ Datos recibidos: deviceUniqueId=$deviceUniqueId")
+
+        if (!isServiceRunning) {
+            startForegroundService()
+            startLocationTracking()
+            setupWebSocket()
+
+            // ✅ REGISTRAR RECEIVER SOLO UNA VEZ
+            registerAlarmReceiver()
+
+            // ✅ CARGAR ZONA SEGURA
+            loadSafeZone()
+
+            isServiceRunning = true
+            Log.d(TAG, "✅ TrackingService started successfully")
+        } else {
+            Log.d(TAG, "ℹ️ TrackingService already running")
+        }
+
+        return START_STICKY // ✅ REINICIO AUTOMÁTICO
+    }
+
+
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.d(TAG, "🛑 TrackingService destruido")
         isServiceRunning = false
         fusedLocationClient.removeLocationUpdates(locationCallback)
         webSocket?.close(1000, "Service destroyed")
         alertManager?.stopAlert()
-        Log.d(TAG, "🛑 TrackingService destruido")
+        unregisterAlarmReceiver()
+
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:id="@+id/coordinator_layout"
     android:background="@color/background_primary">
 
     <!-- Mapa principal con esquinas redondeadas -->
@@ -223,7 +223,7 @@
         android:id="@+id/buttonMyLocation"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="6dp"
         android:text="Ubicación"
         android:textColor="@android:color/white"
         android:textSize="12sp"
@@ -240,7 +240,7 @@
         android:id="@+id/buttonZonaSegura"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="6dp"
         android:text="Zona"
         android:textColor="@android:color/white"
         android:textSize="12sp"
@@ -258,6 +258,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="Estado"
+        android:layout_marginBottom="6dp"
         android:textColor="@android:color/white"
         android:textSize="12sp"
         android:textStyle="bold"
@@ -267,7 +268,21 @@
         app:cornerRadius="24dp"
         app:elevation="8dp"
         app:pressedTranslationZ="12dp" />
-
+        <!-- Botón para probar WebSocket -->
+        <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+            android:id="@+id/buttonTestWS"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Test WS"
+            android:textColor="@android:color/white"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            app:backgroundTint="#2ECC71"
+            app:icon="@drawable/ic_websocket"
+            app:iconTint="@android:color/white"
+            app:cornerRadius="24dp"
+            app:elevation="8dp"
+            app:pressedTranslationZ="12dp" />
 </LinearLayout>
 
 
@@ -278,7 +293,7 @@
         android:layout_gravity="bottom"
         android:layout_margin="12dp"
         app:cardCornerRadius="20dp"
-        app:cardElevation="16dp"
+        app:cardElevation="8dp"
         app:cardBackgroundColor="@android:color/white">
 
         <LinearLayout
@@ -291,7 +306,7 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonAssociateDevice"
                 android:layout_width="0dp"
-                android:layout_height="60dp"
+                android:layout_height="80dp"
                 android:layout_marginEnd="6dp"
                 android:layout_weight="1"
                 android:text="Asociar\nVehículo"
@@ -310,7 +325,7 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonZonaSeguraMain"
                 android:layout_width="0dp"
-                android:layout_height="60dp"
+                android:layout_height="80dp"
                 android:layout_marginStart="3dp"
                 android:layout_marginEnd="3dp"
                 android:layout_weight="1"
@@ -330,7 +345,7 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonShowConfig"
                 android:layout_width="0dp"
-                android:layout_height="60dp"
+                android:layout_height="80dp"
                 android:layout_marginStart="3dp"
                 android:layout_marginEnd="3dp"
                 android:layout_weight="1"
@@ -350,7 +365,7 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonLogout"
                 android:layout_width="0dp"
-                android:layout_height="60dp"
+                android:layout_height="80dp"
                 android:layout_marginStart="6dp"
                 android:layout_weight="1"
                 android:text="Salir"
