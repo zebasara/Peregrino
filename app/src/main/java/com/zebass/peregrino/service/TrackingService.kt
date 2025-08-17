@@ -26,25 +26,29 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.*
 import com.zebass.peregrino.MainActivity
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.osmdroid.util.GeoPoint
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class TrackingService : Service() {
 
     companion object {
-        private const val TAG = "TrackingService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "tracking_channel"
-        private const val LOCATION_UPDATE_INTERVAL = 5000L // 5 segundos
-        private const val FASTEST_UPDATE_INTERVAL = 2000L // 2 segundos
-        private const val MIN_DISTANCE_CHANGE = 5f // 5 metros
+        private const val LOCATION_UPDATE_INTERVAL = 2000L // ✅ MÁS FRECUENTE PARA TRACKING SUAVE
+        private const val FASTEST_UPDATE_INTERVAL = 1000L
+        private const val MIN_DISTANCE_CHANGE = 2f // ✅ MÁS SENSIBLE
+        private const val GEOFENCE_RADIUS = 15.0
+        private const val TAG = "TrackingService"
 
-        // ✅ CONFIGURACIÓN DE GEOFENCE
-        private const val GEOFENCE_RADIUS = 15.0 // 15 metros como en el Fragment
+        // ✅ URLs CLOUDFLARE DNS
+        private const val BASE_URL = "https://app.socialengeneering.work"
+        private const val WS_URL = "wss://app.socialengeneering.work"
+        private const val TRACCAR_URL = "https://traccar.socialengeneering.work"
 
         // ✅ ACTIONS PARA CONTROL DE ALARMA
         const val ACTION_STOP_ALARM = "com.peregrino.STOP_ALARM"
@@ -58,6 +62,7 @@ class TrackingService : Service() {
     private var isServiceRunning = false
     private var alertManager: AlertManager? = null
     private var alarmReceiver: BroadcastReceiver? = null
+
     // ✅ DATOS DEL DISPOSITIVO
     private var deviceUniqueId: String? = null
     private var jwtToken: String? = null
@@ -67,30 +72,92 @@ class TrackingService : Service() {
     private var isSafeZoneActive = false
     private var isCurrentlyOutsideSafeZone = false
     private var lastAlertTime = 0L
-    private val alertCooldownTime = 30000L // 30 segundos entre alertas
+    private val alertCooldownTime = 30000L
 
-    // ✅ HTTP CLIENT OPTIMIZADO
+    // ✅ NUEVO: TRACKING SUAVE Y FILTRADO
+    private var kalmanFilter: LocationKalmanFilter? = null
+    private var lastSentPosition: Location? = null
+    private var lastSentTime = 0L
+    private val sendThrottle = 3000L // Enviar máximo cada 3 segundos al servidor
+    private val broadcastThrottle = 500L // Broadcast local más frecuente
+    private var lastBroadcastTime = 0L
+
+    // ✅ HTTP CLIENT OPTIMIZADO PARA TIEMPO REAL
     private val httpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .writeTimeout(5, TimeUnit.SECONDS)
-            .pingInterval(30, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(8, TimeUnit.SECONDS)
+            .pingInterval(20, TimeUnit.SECONDS) // ✅ MÁS FRECUENTE PARA TIEMPO REAL
             .retryOnConnectionFailure(true)
+            .addInterceptor { chain ->
+                val request = chain.request().newBuilder()
+                    .addHeader("User-Agent", "PeregrinoGPS-Service-RealTime/2.0")
+                    .addHeader("Accept", "application/json")
+                    .addHeader("Connection", "keep-alive")
+                    .build()
+                chain.proceed(request)
+            }
             .build()
     }
 
     private val handler = Handler(Looper.getMainLooper())
 
+    // ✅ FILTRO KALMAN SIMPLIFICADO PARA EL SERVICIO
+    private class LocationKalmanFilter {
+        private var lat: Double = 0.0
+        private var lon: Double = 0.0
+        private var variance: Double = 1000.0
+        private var lastTimestamp: Long = 0L
+
+        fun update(location: Location): Location {
+            val currentTime = location.time
+            val deltaTime = if (lastTimestamp == 0L) 1.0 else (currentTime - lastTimestamp) / 1000.0
+            lastTimestamp = currentTime
+
+            if (deltaTime > 60.0) { // Reset si gap muy grande
+                lat = location.latitude
+                lon = location.longitude
+                variance = location.accuracy.toDouble()
+                return location
+            }
+
+            // Proceso de predicción
+            variance += 0.1 * deltaTime // Incrementar incertidumbre con el tiempo
+
+            // Actualización con medición
+            val measurementVariance = location.accuracy.toDouble()
+            val gain = variance / (variance + measurementVariance)
+
+            lat += gain * (location.latitude - lat)
+            lon += gain * (location.longitude - lon)
+            variance *= (1 - gain)
+
+            // Crear nueva ubicación filtrada
+            val filteredLocation = Location(location.provider)
+            filteredLocation.latitude = lat
+            filteredLocation.longitude = lon
+            filteredLocation.accuracy = variance.toFloat().coerceAtMost(location.accuracy)
+            filteredLocation.time = currentTime
+            filteredLocation.speed = location.speed
+            filteredLocation.bearing = location.bearing
+
+            return filteredLocation
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "🚀 TrackingService creado")
+        Log.d(TAG, "🚀 Enhanced TrackingService created")
 
         createNotificationChannel()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         alertManager = AlertManager(this)
 
-        // ✅ REGISTRAR BROADCAST RECEIVER PARA ACCIONES DE ALARMA
+        // ✅ INICIALIZAR KALMAN FILTER
+        kalmanFilter = LocationKalmanFilter()
+
+        // ✅ REGISTRAR BROADCAST RECEIVER
         registerAlarmReceiver()
 
         // ✅ CARGAR ZONA SEGURA
@@ -101,10 +168,10 @@ class TrackingService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "GPS Tracking",
-                NotificationManager.IMPORTANCE_LOW // ✅ BAJA PARA NO MOLESTAR
+                "GPS Tracking en Tiempo Real",
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Rastreo GPS en segundo plano"
+                description = "Rastreo GPS suave y en tiempo real"
                 setShowBadge(false)
                 enableLights(false)
                 enableVibration(false)
@@ -118,11 +185,10 @@ class TrackingService : Service() {
     private fun startForegroundService() {
         val notification = createTrackingNotification()
         startForeground(NOTIFICATION_ID, notification)
-        Log.d(TAG, "✅ Servicio en primer plano iniciado")
+        Log.d(TAG, "✅ Enhanced foreground service started")
     }
 
     private fun createTrackingNotification(): Notification {
-        // ✅ INTENT PARA ABRIR LA APP
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -131,7 +197,6 @@ class TrackingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // ✅ INTENT PARA DESACTIVAR ZONA SEGURA RÁPIDO
         val disableSafeZoneIntent = Intent(this, TrackingService::class.java).apply {
             action = ACTION_DISABLE_SAFEZONE
         }
@@ -141,16 +206,15 @@ class TrackingService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("🛡️ GPS Tracking Activo")
+            .setContentTitle("🛡️ GPS Tracking en Tiempo Real")
             .setContentText(buildNotificationText())
-            .setSmallIcon(R.drawable.ic_gps_tracking) // Necesitarás este ícono
+            .setSmallIcon(R.drawable.ic_gps_tracking)
             .setContentIntent(openAppPendingIntent)
             .setOngoing(true)
             .setAutoCancel(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .apply {
-                // ✅ BOTÓN DE DESACTIVACIÓN RÁPIDA SOLO SI HAY ZONA SEGURA
                 if (isSafeZoneActive) {
                     addAction(
                         R.drawable.ic_shield_off,
@@ -164,26 +228,30 @@ class TrackingService : Service() {
 
     private fun buildNotificationText(): String {
         return when {
-            !isSafeZoneActive -> "Rastreando ubicación - Sin zona segura"
+            !isSafeZoneActive -> "Tracking suave activo - Sin zona segura"
             isCurrentlyOutsideSafeZone -> "⚠️ FUERA DE ZONA SEGURA"
-            else -> "✅ Dentro de zona segura"
+            else -> "✅ Dentro de zona segura - Tracking activo"
         }
     }
 
+    // ✅ CONFIGURACIÓN MEJORADA DE TRACKING DE UBICACIÓN
     @SuppressLint("MissingPermission")
     private fun startLocationTracking() {
-        val locationRequest = LocationRequest.create().apply {
-            interval = LOCATION_UPDATE_INTERVAL
-            fastestInterval = FASTEST_UPDATE_INTERVAL
-            priority = LocationRequest.PRIORITY_HIGH_ACCURACY
-            smallestDisplacement = MIN_DISTANCE_CHANGE
-        }
+        val locationRequest = LocationRequest.Builder(
+            Priority.PRIORITY_HIGH_ACCURACY,
+            LOCATION_UPDATE_INTERVAL
+        ).apply {
+            setMinUpdateIntervalMillis(FASTEST_UPDATE_INTERVAL)
+            setMinUpdateDistanceMeters(MIN_DISTANCE_CHANGE)
+            setMaxUpdateDelayMillis(LOCATION_UPDATE_INTERVAL * 2)
+            setWaitForAccurateLocation(false) // No esperar GPS perfecto
+        }.build()
 
         locationCallback = object : LocationCallback() {
             @RequiresApi(Build.VERSION_CODES.O)
             override fun onLocationResult(locationResult: LocationResult) {
                 locationResult.lastLocation?.let { location ->
-                    handleLocationUpdate(location)
+                    handleLocationUpdateEnhanced(location)
                 }
             }
         }
@@ -194,38 +262,97 @@ class TrackingService : Service() {
                 locationCallback,
                 Looper.getMainLooper()
             )
-            Log.d(TAG, "✅ Rastreo de ubicación iniciado")
+            Log.d(TAG, "✅ Enhanced location tracking started")
         } else {
             Log.e(TAG, "❌ Sin permisos de ubicación")
             stopSelf()
         }
     }
 
-    // ✅ FUNCIÓN PRINCIPAL PARA MANEJAR ACTUALIZACIONES DE UBICACIÓN
+    // ✅ MANEJO MEJORADO DE ACTUALIZACIONES DE UBICACIÓN
     @RequiresApi(Build.VERSION_CODES.O)
-    private fun handleLocationUpdate(location: Location) {
-        val currentPosition = GeoPoint(location.latitude, location.longitude)
+    private fun handleLocationUpdateEnhanced(location: Location) {
+        try {
+            // ✅ APLICAR FILTRO KALMAN
+            val filteredLocation = kalmanFilter?.update(location) ?: location
 
-        Log.d(TAG, "📍 Nueva ubicación: ${location.latitude}, ${location.longitude}")
+            val currentPosition = GeoPoint(filteredLocation.latitude, filteredLocation.longitude)
+            val currentTime = System.currentTimeMillis()
 
-        // ✅ VERIFICAR ZONA SEGURA SI ESTÁ ACTIVA
-        if (isSafeZoneActive && safeZoneCenter != null) {
-            checkSafeZoneStatus(currentPosition)
+            Log.d(TAG, "📍 Enhanced location: ${filteredLocation.latitude}, ${filteredLocation.longitude}" +
+                    " (accuracy: ${filteredLocation.accuracy}m, speed: ${filteredLocation.speed} m/s)")
+
+            // ✅ VERIFICAR ZONA SEGURA SI ESTÁ ACTIVA
+            if (isSafeZoneActive && safeZoneCenter != null) {
+                checkSafeZoneStatus(currentPosition)
+            }
+
+            // ✅ BROADCAST LOCAL MÁS FRECUENTE PARA LA APP
+            if (currentTime - lastBroadcastTime > broadcastThrottle) {
+                broadcastLocationUpdate(filteredLocation)
+                lastBroadcastTime = currentTime
+            }
+
+            // ✅ ENVÍO AL SERVIDOR CON THROTTLE
+            if (shouldSendToServer(filteredLocation, currentTime)) {
+                sendLocationToServer(currentPosition, filteredLocation)
+                lastSentPosition = filteredLocation
+                lastSentTime = currentTime
+            }
+
+            // ✅ ACTUALIZAR NOTIFICACIÓN
+            updateNotification()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error in enhanced location handling: ${e.message}")
         }
-
-        // ✅ ENVIAR UBICACIÓN AL SERVIDOR
-        sendLocationToServer(currentPosition, location)
-
-        // ✅ ACTUALIZAR NOTIFICACIÓN
-        updateNotification()
     }
 
-    // ✅ VERIFICACIÓN CRÍTICA DE ZONA SEGURA
+    // ✅ DECIDIR SI ENVIAR AL SERVIDOR (OPTIMIZACIÓN DE BATERÍA Y RED)
+    // ✅ MEJORAR shouldSendToServer en TrackingService
+    private fun shouldSendToServer(location: Location, currentTime: Long): Boolean {
+        // Enviar si es la primera posición
+        if (lastSentPosition == null) return true
+
+        // ✅ TIEMPO MÍNIMO RESPETADO
+        if (currentTime - lastSentTime < sendThrottle) return false
+
+        val distance = lastSentPosition!!.distanceTo(location)
+        val speedDiff = Math.abs(location.speed - (lastSentPosition?.speed ?: 0f))
+        val accuracyImprovement = (lastSentPosition?.accuracy ?: 100f) - location.accuracy
+
+        // ✅ CRITERIOS OPTIMIZADOS
+        return when {
+            distance > MIN_DISTANCE_CHANGE * 3 -> true // 6 metros de movimiento
+            speedDiff > 2.0 -> true // Cambio de velocidad > 7 km/h
+            accuracyImprovement > 10 -> true // Mejora significativa de precisión
+            location.speed > 5 && distance > 1 -> true // Movimiento rápido
+            currentTime - lastSentTime > 10000 -> true // Máximo 10 segundos sin envío
+            else -> false
+        }
+    }
+
+    // ✅ BROADCAST PARA LA APP (TIEMPO REAL LOCAL)
+    private fun broadcastLocationUpdate(location: Location) {
+        val intent = Intent("com.peregrino.LOCATION_UPDATE").apply {
+            putExtra("latitude", location.latitude)
+            putExtra("longitude", location.longitude)
+            putExtra("speed", location.speed)
+            putExtra("bearing", location.bearing)
+            putExtra("accuracy", location.accuracy)
+            putExtra("timestamp", location.time)
+            putExtra("deviceId", deviceUniqueId)
+        }
+        sendBroadcast(intent)
+
+        Log.d(TAG, "📡 Location broadcast sent to app")
+    }
+
+    // ✅ VERIFICACIÓN MEJORADA DE ZONA SEGURA
     @RequiresApi(Build.VERSION_CODES.O)
     private fun checkSafeZoneStatus(currentPosition: GeoPoint) {
         val safeZone = safeZoneCenter ?: return
 
-        // ✅ CALCULAR DISTANCIA PRECISA
         val distance = calculateDistance(safeZone, currentPosition)
 
         Log.d(TAG, "📏 Distancia a zona segura: ${String.format("%.1f", distance)}m")
@@ -234,19 +361,16 @@ class TrackingService : Service() {
         val isNowOutside = distance > GEOFENCE_RADIUS
 
         if (!wasOutside && isNowOutside) {
-            // ✅ ACABA DE SALIR DE LA ZONA SEGURA
             Log.w(TAG, "🚨 SALIÓ DE LA ZONA SEGURA - Distancia: ${String.format("%.1f", distance)}m")
             isCurrentlyOutsideSafeZone = true
             triggerSafeZoneAlert(distance)
 
         } else if (wasOutside && !isNowOutside) {
-            // ✅ REGRESÓ A LA ZONA SEGURA
             Log.d(TAG, "✅ REGRESÓ A LA ZONA SEGURA - Distancia: ${String.format("%.1f", distance)}m")
             isCurrentlyOutsideSafeZone = false
             stopAlarm()
 
         } else if (isNowOutside) {
-            // ✅ CONTINÚA FUERA - VERIFICAR SI NECESITA NUEVA ALERTA
             val timeSinceLastAlert = System.currentTimeMillis() - lastAlertTime
             if (timeSinceLastAlert > alertCooldownTime) {
                 Log.w(TAG, "🔄 CONTINÚA FUERA - Nueva alerta - Distancia: ${String.format("%.1f", distance)}m")
@@ -255,12 +379,11 @@ class TrackingService : Service() {
         }
     }
 
-    // ✅ DISPARAR ALARMA CRÍTICA
+    // ✅ DISPARAR ALARMA CRÍTICA (SIN CAMBIOS)
     @RequiresApi(Build.VERSION_CODES.O)
     private fun triggerSafeZoneAlert(distance: Double) {
         val now = System.currentTimeMillis()
 
-        // ✅ COOLDOWN PARA EVITAR SPAM
         if (now - lastAlertTime < alertCooldownTime) {
             Log.d(TAG, "⏳ Alerta en cooldown, ignorando")
             return
@@ -271,18 +394,12 @@ class TrackingService : Service() {
         Log.e(TAG, "🚨🚨🚨 ALERTA CRÍTICA - VEHÍCULO FUERA DE ZONA SEGURA 🚨🚨🚨")
         Log.e(TAG, "📏 Distancia: ${String.format("%.1f", distance)}m")
 
-        // ✅ ACTIVAR ALARMA COMPLETA
         alertManager?.startCriticalAlert(deviceUniqueId.hashCode(), distance)
-
-        // ✅ NOTIFICACIÓN DE EMERGENCIA
         showEmergencyNotification(distance)
-
-        // ✅ BROADCAST PARA LA APP (SI ESTÁ ABIERTA)
         sendAlertBroadcast(distance)
     }
 
     private fun showEmergencyNotification(distance: Double) {
-        // ✅ INTENTS PARA ACCIONES RÁPIDAS
         val stopAlarmIntent = Intent(this, TrackingService::class.java).apply {
             action = ACTION_STOP_ALARM
         }
@@ -324,7 +441,6 @@ class TrackingService : Service() {
             )
             .build()
 
-        // ✅ MOSTRAR CON ID DIFERENTE PARA QUE SEA MUY VISIBLE
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(9999, emergencyNotification)
     }
@@ -338,30 +454,24 @@ class TrackingService : Service() {
         sendBroadcast(intent)
     }
 
-    // ✅ FUNCIONES DE CONTROL DE ALARMA
+    // ✅ FUNCIONES DE CONTROL DE ALARMA (SIN CAMBIOS PRINCIPALES)
     private fun stopAlarm() {
         alertManager?.stopAlert()
 
-        // ✅ CANCELAR NOTIFICACIÓN DE EMERGENCIA
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.cancel(9999)
 
-        // ✅ ACTUALIZAR NOTIFICACIÓN PRINCIPAL
         updateNotification()
-
         Log.d(TAG, "🔇 Alarma detenida")
     }
 
     private fun disableSafeZone() {
-        // ✅ DESACTIVAR ZONA SEGURA LOCALMENTE
         isSafeZoneActive = false
         safeZoneCenter = null
         isCurrentlyOutsideSafeZone = false
 
-        // ✅ DETENER ALARMA
         stopAlarm()
 
-        // ✅ LIMPIAR PREFERENCIAS
         val prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
         prefs.edit().apply {
             remove("safezone_lat")
@@ -369,16 +479,13 @@ class TrackingService : Service() {
             apply()
         }
 
-        // ✅ ACTUALIZAR NOTIFICACIÓN
         updateNotification()
 
-        // ✅ NOTIFICAR A LA APP
         val intent = Intent("com.peregrino.SAFEZONE_DISABLED")
         sendBroadcast(intent)
 
         Log.d(TAG, "🛡️ Zona segura desactivada")
 
-        // ✅ TOAST PARA CONFIRMAR
         handler.post {
             Toast.makeText(this, "✅ Zona segura desactivada", Toast.LENGTH_LONG).show()
         }
@@ -387,17 +494,14 @@ class TrackingService : Service() {
     private fun emergencyDisable() {
         Log.d(TAG, "🚨 DESACTIVACIÓN DE EMERGENCIA")
 
-        // ✅ DETENER TODO
         stopAlarm()
         disableSafeZone()
 
-        // ✅ NOTIFICACIÓN DE CONFIRMACIÓN
         handler.post {
             Toast.makeText(this, "🚨 ZONA SEGURA DESACTIVADA - ALARMA DETENIDA", Toast.LENGTH_LONG).show()
         }
     }
 
-    // ✅ CARGAR ZONA SEGURA AL INICIO
     private fun loadSafeZone() {
         val prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
         val lat = prefs.getString("safezone_lat", null)?.toDoubleOrNull()
@@ -418,37 +522,134 @@ class TrackingService : Service() {
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
-    // ✅ WEBSOCKET PARA RECIBIR ACTUALIZACIONES
+    // ✅ WEBSOCKET MEJORADO PARA RECIBIR ACTUALIZACIONES EN TIEMPO REAL
     private fun setupWebSocket() {
-        if (jwtToken.isNullOrEmpty()) return
+        if (jwtToken.isNullOrEmpty()) {
+            Log.w(TAG, "⚠️ No JWT token for WebSocket")
+            return
+        }
 
-        val wsUrl = "wss://carefully-arriving-shepherd.ngrok-free.app/ws?token=$jwtToken"
-        val request = Request.Builder().url(wsUrl).build()
+        val wsUrl = "$WS_URL/ws?token=$jwtToken"
+        val request = Request.Builder()
+            .url(wsUrl)
+            .addHeader("User-Agent", "PeregrinoGPS-Service-Enhanced/2.0")
+            .build()
 
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    val json = JSONObject(text)
-                    when (json.getString("type")) {
-                        "SAFEZONE_UPDATED" -> {
-                            Log.d(TAG, "🛡️ Zona segura actualizada desde servidor")
-                            loadSafeZone()
-                        }
-                        "SAFEZONE_DELETED" -> {
-                            Log.d(TAG, "🗑️ Zona segura eliminada desde servidor")
-                            disableSafeZone()
-                        }
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.d(TAG, "✅ Service WebSocket connected")
+
+                // Suscribirse a actualizaciones del dispositivo
+                if (!deviceUniqueId.isNullOrEmpty()) {
+                    val subscribeMessage = JSONObject().apply {
+                        put("type", "SUBSCRIBE_SERVICE")
+                        put("deviceId", deviceUniqueId)
+                        put("service", "tracking")
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error procesando WebSocket: ${e.message}")
+                    webSocket.send(subscribeMessage.toString())
+                    Log.d(TAG, "📡 Service subscribed to device: $deviceUniqueId")
                 }
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                handleServiceWebSocketMessage(text)
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "❌ Service WebSocket error: ${t.message}")
+
+                // Reconectar después de 10 segundos
+                handler.postDelayed({
+                    if (isServiceRunning) {
+                        setupWebSocket()
+                    }
+                }, 10000)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "🔌 Service WebSocket closed: $code - $reason")
             }
         })
     }
 
+    private fun handleServiceWebSocketMessage(message: String) {
+        try {
+            val json = JSONObject(message)
+            val type = json.getString("type")
+
+            when (type) {
+                "SAFEZONE_UPDATED" -> {
+                    Log.d(TAG, "🛡️ Safe zone updated from server")
+                    loadSafeZone()
+                }
+
+                "SAFEZONE_DELETED" -> {
+                    Log.d(TAG, "🗑️ Safe zone deleted from server")
+                    disableSafeZone()
+                }
+
+                "CONFIG_UPDATE" -> {
+                    val config = json.getJSONObject("config")
+                    val newInterval = config.optLong("updateInterval", LOCATION_UPDATE_INTERVAL)
+                    Log.d(TAG, "⚙️ Config update received - interval: ${newInterval}ms")
+                    // Aquí podrías ajustar dinámicamente los intervalos
+                }
+
+                "EMERGENCY_STOP" -> {
+                    Log.w(TAG, "🚨 Emergency stop received from server")
+                    emergencyDisable()
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error processing service WebSocket message: ${e.message}")
+        }
+    }
+
+    // ✅ ENVÍO OPTIMIZADO AL SERVIDOR CON CLOUDFLARE
     private fun sendLocationToServer(position: GeoPoint, location: Location) {
-        // Implementación simplificada - puedes expandirla
-        Log.d(TAG, "📤 Enviando ubicación al servidor: $position")
+        if (deviceUniqueId.isNullOrEmpty()) {
+            Log.w(TAG, "⚠️ No device ID for server update")
+            return
+        }
+
+        val locationData = JSONObject().apply {
+            put("id", deviceUniqueId)
+            put("lat", position.latitude)
+            put("lon", position.longitude)
+            put("timestamp", System.currentTimeMillis() / 1000)
+            put("speed", location.speed * 3.6) // Convertir m/s a km/h
+            put("course", location.bearing)
+            put("accuracy", location.accuracy)
+            put("source", "android_service_enhanced")
+            put("filtered", true) // Indicar que está filtrado con Kalman
+        }
+
+        val requestBody = locationData.toString()
+            .toRequestBody("application/json".toMediaType())
+
+        val request = Request.Builder()
+            .url("$BASE_URL/gps/osmand")
+            .post(requestBody)
+            .addHeader("Authorization", "Bearer $jwtToken")
+            .addHeader("User-Agent", "PeregrinoGPS-Service-Enhanced/2.0")
+            .addHeader("X-Real-Time", "true")
+            .build()
+
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                Log.e(TAG, "❌ Failed to send location to server: ${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    Log.d(TAG, "✅ Location sent to server successfully")
+                } else {
+                    Log.e(TAG, "❌ Server error: ${response.code} - ${response.message}")
+                }
+                response.close()
+            }
+        })
     }
 
     // ✅ UTILIDADES
@@ -468,7 +669,8 @@ class TrackingService : Service() {
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
     }
-    // ✅ REGISTRO DE BROADCAST RECEIVER CORREGIDO
+
+    // ✅ BROADCAST RECEIVER MEJORADO
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private fun registerAlarmReceiver() {
         if (alarmReceiver != null) {
@@ -479,11 +681,12 @@ class TrackingService : Service() {
         val filter = IntentFilter().apply {
             addAction("com.peregrino.STOP_ALARM_BROADCAST")
             addAction("com.peregrino.DISABLE_SAFEZONE_BROADCAST")
+            addAction("com.peregrino.EMERGENCY_DISABLE_BROADCAST")
         }
 
         alarmReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                Log.d(TAG, "📨 Broadcast received: ${intent?.action}")
+                Log.d(TAG, "📨 Enhanced broadcast received: ${intent?.action}")
                 when (intent?.action) {
                     "com.peregrino.STOP_ALARM_BROADCAST" -> {
                         Log.d(TAG, "🔇 Stopping alarm via broadcast")
@@ -492,6 +695,10 @@ class TrackingService : Service() {
                     "com.peregrino.DISABLE_SAFEZONE_BROADCAST" -> {
                         Log.d(TAG, "🛡️ Disabling safezone via broadcast")
                         disableSafeZone()
+                    }
+                    "com.peregrino.EMERGENCY_DISABLE_BROADCAST" -> {
+                        Log.d(TAG, "🚨 Emergency disable via broadcast")
+                        emergencyDisable()
                     }
                 }
             }
@@ -503,19 +710,18 @@ class TrackingService : Service() {
             } else {
                 registerReceiver(alarmReceiver, filter)
             }
-            Log.d(TAG, "✅ Alarm receiver registered successfully")
+            Log.d(TAG, "✅ Enhanced alarm receiver registered")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error registering alarm receiver: ${e.message}")
             alarmReceiver = null
         }
     }
 
-    // ✅ FUNCIÓN PARA DESREGISTRAR RECEIVER SAFELY
     private fun unregisterAlarmReceiver() {
         alarmReceiver?.let { receiver ->
             try {
                 unregisterReceiver(receiver)
-                Log.d(TAG, "✅ Alarm receiver unregistered successfully")
+                Log.d(TAG, "✅ Alarm receiver unregistered")
             } catch (e: Exception) {
                 Log.w(TAG, "⚠️ Receiver already unregistered: ${e.message}")
             } finally {
@@ -523,11 +729,12 @@ class TrackingService : Service() {
             }
         }
     }
-    // ✅ TAMBIÉN AGREGAR EN onStartCommand PARA EVITAR DOBLE REGISTRO
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "📱 TrackingService onStartCommand")
 
-        // ✅ MANEJAR ACCIONES ESPECIALES PRIMERO
+    // ✅ CICLO DE VIDA MEJORADO
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "📱 Enhanced TrackingService onStartCommand")
+
+        // Manejar acciones especiales
         when (intent?.action) {
             ACTION_STOP_ALARM -> {
                 Log.d(TAG, "🔇 Deteniendo alarma por acción del usuario")
@@ -540,13 +747,13 @@ class TrackingService : Service() {
                 return START_STICKY
             }
             ACTION_EMERGENCY_DISABLE -> {
-                Log.d(TAG, "🚨 Desactivación de emergencia - deteniendo todo")
+                Log.d(TAG, "🚨 Desactivación de emergencia")
                 emergencyDisable()
                 return START_STICKY
             }
         }
 
-        // ✅ OBTENER DATOS DEL INTENT
+        // Obtener datos del intent
         deviceUniqueId = intent?.getStringExtra("deviceUniqueId")
         jwtToken = intent?.getStringExtra("jwtToken")
 
@@ -556,39 +763,40 @@ class TrackingService : Service() {
             return START_NOT_STICKY
         }
 
-        Log.d(TAG, "✅ Datos recibidos: deviceUniqueId=$deviceUniqueId")
+        Log.d(TAG, "✅ Enhanced service data: deviceUniqueId=$deviceUniqueId")
 
         if (!isServiceRunning) {
             startForegroundService()
             startLocationTracking()
             setupWebSocket()
-
-            // ✅ REGISTRAR RECEIVER SOLO UNA VEZ
             registerAlarmReceiver()
-
-            // ✅ CARGAR ZONA SEGURA
             loadSafeZone()
 
             isServiceRunning = true
-            Log.d(TAG, "✅ TrackingService started successfully")
+            Log.d(TAG, "✅ Enhanced TrackingService started successfully")
         } else {
-            Log.d(TAG, "ℹ️ TrackingService already running")
+            Log.d(TAG, "ℹ️ Enhanced TrackingService already running")
         }
 
-        return START_STICKY // ✅ REINICIO AUTOMÁTICO
+        return START_STICKY
     }
-
-
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "🛑 TrackingService destruido")
+        Log.d(TAG, "🛑 Enhanced TrackingService destroyed")
+
         isServiceRunning = false
+
+        // Limpiar recursos
         fusedLocationClient.removeLocationUpdates(locationCallback)
         webSocket?.close(1000, "Service destroyed")
         alertManager?.stopAlert()
         unregisterAlarmReceiver()
 
+        // Limpiar filtro Kalman
+        kalmanFilter = null
+
+        Log.d(TAG, "✅ Enhanced service cleanup completed")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

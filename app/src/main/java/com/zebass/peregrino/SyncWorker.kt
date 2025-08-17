@@ -26,7 +26,7 @@ class SyncWorker(
 
     companion object {
         private const val TAG = "SyncWorker"
-        private const val BASE_URL = "https://carefully-arriving-shepherd.ngrok-free.app"
+        private const val BASE_URL = "https://app.socialengeneering.work"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_JWT_TOKEN = "jwt_token"
         const val KEY_SYNC_TYPE = "sync_type"
@@ -292,7 +292,6 @@ class SyncWorker(
                 .addHeader("X-Device-ID", deviceId.toString())
                 .tag("positions_sync")
                 .build()
-
             val response = httpClient.newCall(request).execute()
 
             if (response.isSuccessful) {

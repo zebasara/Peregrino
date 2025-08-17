@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Signal waves -->
+    <path
+        android:fillColor="#00d4aa"
+        android:pathData="M2,17h20v2H2V17z M1.15,13.35L2.85,11.65C4.7,13.5 7.25,14.5 10,14.5s5.3,-1 7.15,-2.85l1.7,1.7C16.4,15.8 13.3,17 10,17S3.6,15.8 1.15,13.35z M6.7,8.8l1.7,1.7C9.1,9.8 9.55,9.5 10,9.5s0.9,0.3 1.6,1l1.7,-1.7C12.4,7.9 11.25,7.5 10,7.5S7.6,7.9 6.7,8.8z M10,3C6.65,3 3.55,4.2 1.1,6.65L2.8,8.35C4.65,6.5 7.2,5.5 10,5.5s5.35,1 7.2,2.85l1.7,-1.7C16.45,4.2 13.35,3 10,3z" />
+
+    <!-- Barras de señal -->
+    <rect
+        android:fillColor="#00d4aa"
+        android:x="3dp"
+        android:y="18dp"
+        android:width="2dp"
+        android:height="3dp" />
+    <rect
+        android:fillColor="#00d4aa"
+        android:x="7dp"
+        android:y="16dp"
+        android:width="2dp"
+        android:height="5dp" />
+    <rect
+        android:fillColor="#00d4aa"
+        android:x="11dp"
+        android:y="14dp"
+        android:width="2dp"
+        android:height="7dp" />
+    <rect
+        android:fillColor="#00d4aa"
+        android:x="15dp"
+        android:y="12dp"
+        android:width="2dp"
+        android:height="9dp" />
+    <rect
+        android:fillColor="#00d4aa"
+        android:x="19dp"
+        android:y="10dp"
+        android:width="2dp"
+        android:height="11dp" />
+</vector>

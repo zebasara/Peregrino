@@ -44,8 +44,21 @@ class MainActivity : AppCompatActivity() {
         scheduleSyncWork()
         // ✅ CONFIGURAR NAVEGACIÓN SEGURA
         setupNavigation()
+        requestLocationPermissions()
 
 
+    }
+    // ✅ AÑADIR AL FINAL DE onCreate() en MainActivity
+    private fun requestLocationPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val permissions = arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            )
+
+            requestPermissions(permissions, 1001)
+        }
     }
 
     override fun onRequestPermissionsResult(
@@ -54,7 +67,14 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
+        if (requestCode == 1001) {
+            val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (allGranted) {
+                Log.d("MainActivity", "✅ Todos los permisos de ubicación concedidos")
+            } else {
+                Log.e("MainActivity", "❌ Permisos de ubicación denegados - GPS no funcionará")
+            }
+        }
         when (requestCode) {
             NOTIFICATION_PERMISSION_REQUEST_CODE -> {
                 if (grantResults.isNotEmpty() &&

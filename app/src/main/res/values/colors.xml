@@ -218,6 +218,19 @@
     <color name="battery_medium">#FF9800</color>
     <color name="battery_low">#F44336</color>
     <color name="battery_critical">#D32F2F</color>
+    <!-- Colores principales -->
+    <color name="accent_primary">#667eea</color>
+    <color name="accent_secondary">#764ba2</color>
+
+    <!-- Colores de estado -->
+    <color name="success_color">#00d4aa</color>
+    <color name="warning_color">#fdcb6e</color>
+    <color name="error_color">#fd79a8</color>
+
+    <color name="holo_green_light">#4CAF50</color>
+    <color name="holo_orange_light">#FF9800</color>
+    <color name="holo_blue_light">#03A9F4</color>
+
 
 
 </resources>

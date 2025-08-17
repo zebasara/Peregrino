@@ -25,7 +25,12 @@ class FirstFragment : Fragment() {
     private lateinit var sharedPreferences: SharedPreferences
 
     companion object {
-        private const val TAG = "FirstFragment"
+
+            private const val TAG = "FirstFragment"
+            // ✅ NUEVAS URLs CON CLOUDFLARE TUNNELS (HTTPS)
+            private const val BASE_URL = "https://app.socialengeneering.work"
+            private const val TRACCAR_URL = "https://traccar.socialengeneering.work"
+
     }
 
     override fun onCreateView(
@@ -66,9 +71,10 @@ class FirstFragment : Fragment() {
         val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
 
         val request = Request.Builder()
-            .url("https://carefully-arriving-shepherd.ngrok-free.app/api/auth/register")
+            .url("$BASE_URL/api/auth/register") // ✅ HTTPS Cloudflare
             .post(requestBody)
-            .addHeader("User-Agent", "PeregrinoGPS/1.0")
+            .addHeader("User-Agent", "PeregrinoGPS-Cloudflare/1.0")
+            .addHeader("Accept", "application/json")
             .build()
 
         client.newCall(request).enqueue(object : Callback {
@@ -83,53 +89,8 @@ class FirstFragment : Fragment() {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                Log.d(TAG, "Register response: ${response.code}")
-
-                // ✅ LEER EL BODY ANTES DEL response.use - CRÍTICO
-                val responseBodyString = try {
-                    response.body?.string()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error reading response body", e)
-                    null
-                }
-
-                // ✅ AHORA usar response.use sin intentar leer el body otra vez
-                response.use {
-                    if (isAdded && !isDetached) {
-                        requireActivity().runOnUiThread {
-                            setLoadingState(false)
-
-                            if (response.isSuccessful && responseBodyString != null) {
-                                try {
-                                    val jsonResponse = JSONObject(responseBodyString)
-                                    val token = jsonResponse.optString("token", "")
-
-                                    if (token.isNotEmpty()) {
-                                        Log.d(TAG, "Register successful, saving session")
-                                        saveUserSession(token, email, password)
-                                        showSuccess("¡Registro exitoso! Bienvenido a Peregrino GPS")
-                                        navigateToSecondFragment(token, email)
-                                    } else {
-                                        Log.e(TAG, "Empty token received")
-                                        showError("Error: Token vacío recibido del servidor")
-                                    }
-
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error parsing register response", e)
-                                    Log.e(TAG, "Raw response body: $responseBodyString")
-                                    showError("Error procesando respuesta del servidor")
-                                }
-                            } else {
-                                val errorMsg = when (response.code) {
-                                    400 -> "Este email ya está registrado. Intenta iniciar sesión."
-                                    422 -> "Datos inválidos. Verifica el formato del email."
-                                    else -> "Error al registrar: ${response.code}. Intenta nuevamente."
-                                }
-                                showError(errorMsg)
-                            }
-                        }
-                    }
-                }
+                // ✅ MISMO MANEJO DE RESPUESTA
+                handleAuthResponse(response, "register", email, password)
             }
         })
     }
@@ -143,11 +104,11 @@ class FirstFragment : Fragment() {
         val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
 
         val request = Request.Builder()
-            .url("https://carefully-arriving-shepherd.ngrok-free.app/api/auth/login")
+            .url("$BASE_URL/api/auth/login") // ✅ HTTPS Cloudflare
             .post(requestBody)
-            .addHeader("User-Agent", "PeregrinoGPS/1.0")
+            .addHeader("User-Agent", "PeregrinoGPS-Cloudflare/1.0")
+            .addHeader("Accept", "application/json")
             .build()
-
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 Log.e(TAG, "Login network error", e)
@@ -160,59 +121,12 @@ class FirstFragment : Fragment() {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                Log.d(TAG, "Login response: ${response.code}")
-
-                // ✅ LEER EL BODY ANTES DEL response.use - CRÍTICO
-                val responseBodyString = try {
-                    response.body?.string()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error reading response body", e)
-                    null
-                }
-
-                // ✅ AHORA usar response.use sin intentar leer el body otra vez
-                response.use {
-                    if (isAdded && !isDetached) {
-                        requireActivity().runOnUiThread {
-                            setLoadingState(false)
-
-                            if (response.isSuccessful && responseBodyString != null) {
-                                try {
-                                    val jsonResponse = JSONObject(responseBodyString)
-                                    val token = jsonResponse.optString("token", "")
-
-                                    if (token.isNotEmpty()) {
-                                        Log.d(TAG, "Login successful, saving session")
-                                        saveUserSession(token, email, password)
-                                        showSuccess("¡Bienvenido de vuelta!")
-                                        navigateToSecondFragment(token, email)
-                                    } else {
-                                        Log.e(TAG, "Empty token received")
-                                        showError("Error: Token vacío recibido del servidor")
-                                    }
-
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error parsing login response", e)
-                                    Log.e(TAG, "Raw response body: $responseBodyString")
-                                    showError("Error procesando respuesta del servidor")
-                                }
-                            } else {
-                                val errorMsg = when (response.code) {
-                                    401 -> "Contraseña incorrecta. Verifica tus credenciales."
-                                    404 -> "Usuario no encontrado. ¿Necesitas crear una cuenta?"
-                                    422 -> "Datos inválidos. Verifica el formato del email."
-                                    else -> "Error al iniciar sesión: ${response.code}. Intenta nuevamente."
-                                }
-                                showError(errorMsg)
-                            }
-                        }
-                    }
-                }
+                // ✅ MISMO MANEJO DE RESPUESTA
+                handleAuthResponse(response, "login", email, password)
             }
         })
     }
 
-    // ✅ FUNCIÓN UNIFICADA PARA MANEJAR RESPUESTAS
     private fun handleAuthResponse(response: Response, action: String, email: String, password: String) {
         Log.d(TAG, "$action response: ${response.code}")
 
@@ -222,9 +136,8 @@ class FirstFragment : Fragment() {
         var errorMessage = ""
 
         try {
-            // ✅ LEER RESPONSE BODY DE MANERA SEGURA
             responseBody = response.body?.string()
-            Log.d(TAG, "$action response body: $responseBody")
+            Log.d(TAG, "$action response body (Cloudflare): $responseBody")
 
             if (response.isSuccessful && responseBody != null) {
                 try {
@@ -233,7 +146,7 @@ class FirstFragment : Fragment() {
 
                     if (token.isNotEmpty()) {
                         success = true
-                        Log.d(TAG, "$action successful - token received")
+                        Log.d(TAG, "$action successful via Cloudflare - token received")
                     } else {
                         errorMessage = "Token vacío recibido del servidor"
                         Log.e(TAG, "$action failed - empty token")
@@ -243,10 +156,8 @@ class FirstFragment : Fragment() {
                     Log.e(TAG, "$action JSON parse error", jsonError)
                 }
             } else {
-                // ✅ MANEJAR ERRORES HTTP
                 errorMessage = when (response.code) {
-                    400 -> if (action == "register") "Este email ya está registrado. Intenta iniciar sesión."
-                    else "Datos inválidos"
+                    400 -> if (action == "register") "Este email ya está registrado." else "Datos inválidos"
                     401 -> "Contraseña incorrecta. Verifica tus credenciales."
                     404 -> "Usuario no encontrado. ¿Necesitas crear una cuenta?"
                     422 -> "Datos inválidos. Verifica el formato del email."
@@ -260,10 +171,9 @@ class FirstFragment : Fragment() {
             errorMessage = "Error leyendo respuesta del servidor"
             Log.e(TAG, "$action response handling error", e)
         } finally {
-            response.close() // ✅ CERRAR RESPONSE EXPLÍCITAMENTE
+            response.close()
         }
 
-        // ✅ ACTUALIZAR UI EN MAIN THREAD
         if (isAdded && !isDetached) {
             requireActivity().runOnUiThread {
                 setLoadingState(false)
@@ -287,8 +197,6 @@ class FirstFragment : Fragment() {
                     showError(errorMessage)
                 }
             }
-        } else {
-            Log.w(TAG, "Fragment not active, skipping UI update")
         }
     }
 
