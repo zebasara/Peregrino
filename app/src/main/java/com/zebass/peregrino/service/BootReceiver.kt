@@ -71,16 +71,6 @@ class BootReceiver : BroadcastReceiver() {
 
         Handler(Looper.getMainLooper()).postDelayed({
             try {
-                // 1. Reiniciar TrackingService
-                startTrackingService(
-                    context,
-                    jwtToken,
-                    deviceUniqueId,
-                    prefs.getInt("associated_device_id", -1),
-                    prefs.getString("associated_device_name", "Unknown Device") ?: "Unknown Device",
-                    reason
-                )
-
                 // 2. Reiniciar SecurityService si está activo
                 if (isSecurityActive && canNotify) {
                     restartSecurityService(context, securityPrefs, reason)
@@ -125,80 +115,6 @@ class BootReceiver : BroadcastReceiver() {
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error restarting security service: ${e.message}")
-        }
-    }
-
-    private fun restartTrackingServiceIfNeeded(context: Context, reason: String) {
-        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-        val jwtToken = prefs.getString("jwt_token", null)
-        val deviceUniqueId = prefs.getString("associated_device_unique_id", null)
-
-        if (jwtToken.isNullOrEmpty() || deviceUniqueId.isNullOrEmpty()) {
-            Log.d(TAG, "❌ No hay datos de sesión guardados")
-            return
-        }
-
-        Handler(Looper.getMainLooper()).postDelayed({
-            try {
-                startTrackingService(
-                    context,
-                    jwtToken,
-                    deviceUniqueId,
-                    prefs.getInt("associated_device_id", -1),
-                    prefs.getString("associated_device_name", "Unknown Device") ?: "Unknown Device",
-                    reason
-                )
-            } catch (e: SecurityException) {
-                Log.e(TAG, "❌ SecurityException: ${e.message}")
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Error: ${e.message}")
-            }
-        }, 3000)
-    }
-
-    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
-    private fun startTrackingService(
-        context: Context,
-        jwtToken: String,
-        deviceUniqueId: String,
-        deviceId: Int,
-        deviceName: String,
-        reason: String
-    ) {
-        try {
-            val canNotify = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) == PackageManager.PERMISSION_GRANTED
-            } else {
-                true
-            }
-
-            val serviceIntent = Intent(context, TrackingService::class.java).apply {
-                putExtra("jwtToken", jwtToken)
-                putExtra("deviceUniqueId", deviceUniqueId)
-                putExtra("deviceId", deviceId)
-                putExtra("auto_restart", true)
-                putExtra("restart_reason", reason)
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
-            }
-
-            SyncWorker.schedulePeriodicSync(context, 15)
-
-            if (canNotify) {
-                showRestartNotification(context, deviceName, reason)
-            } else {
-                Log.w(TAG, "⚠️ No se mostró notificación por falta de permisos")
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Error iniciando TrackingService", e)
         }
     }
 

@@ -70,18 +70,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- Activity de Alerta Crítica -->
-        <activity
-            android:name="com.zebass.peregrino.service.AlertActivity"
-            android:exported="false"
-            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
-            android:showWhenLocked="true"
-            android:turnScreenOn="true"
-            android:excludeFromRecents="true"
-            android:taskAffinity=""
-            android:launchMode="singleTop" />
-
+        
         <!-- Receivers para Alertas -->
         <receiver
             android:name="com.zebass.peregrino.service.AlertStopReceiver"

@@ -56,6 +56,8 @@ class TrackingViewModel : ViewModel() {
 
     private val _deviceInfo = MutableStateFlow<String?>(null)
     val deviceInfo: StateFlow<String?> = _deviceInfo.asStateFlow()
+    // ✅ Add Fragment lifecycle awareness
+    private var isFragmentAttached = true
 
     // ✅ NUEVO: ESTADO DE CONEXIÓN WEBSOCKET
     private val _connectionStatus =
@@ -376,56 +378,17 @@ class TrackingViewModel : ViewModel() {
     // ============ WEBSOCKET MEJORADO PARA TIEMPO REAL ============
     @RequiresApi(Build.VERSION_CODES.O)
     fun startRealTimeTracking(loadInitialPosition: Boolean = true) {
-        Log.d(TAG, "🚀 Starting REAL-TIME GPS tracking from Traccar")
-
-        val deviceUniqueId = getDeviceUniqueId()
-        if (deviceUniqueId == null || SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
-            _error.value = "No hay dispositivo asociado o token inválido"
-            return
-        }
-
-        // ✅ CONFIGURAR COMO PERSISTENTE PARA GPS
         isViewModelActive = true
         keepWebSocketAlive = true
         isTrackingActive = true
-
-        // ✅ INICIALIZAR KALMAN FILTER PARA GPS
         kalmanFilter = VehicleKalmanFilter()
 
-        Log.d(TAG, "🔌 Starting REAL-TIME WebSocket for GPS device: $deviceUniqueId")
-
-        // ✅ CARGAR POSICIÓN INICIAL SI ES NECESARIO
-        if (loadInitialPosition) {
-            loadInitialVehiclePosition(deviceUniqueId)
-        }
-
-        // ✅ WEBSOCKET PRIORITARIO PARA GPS
+        // ✅ NO cargar posición inicial - esperar GPS real
         connectWebSocketForRealTimeGPS()
         startInterpolation()
 
-        // ✅ VERIFICAR CONEXIÓN GPS
-        webSocketScope.launch {
-            delay(5000) // Esperar 5 segundos
-
-            if (_connectionStatus.value != ConnectionStatus.CONNECTED) {
-                Log.w(TAG, "⚠️ GPS WebSocket not connected after 5s - retrying...")
-                connectWebSocketForRealTimeGPS()
-            }
-
-            delay(10000) // Esperar otros 10 segundos
-
-            if (_vehiclePosition.value == null) {
-                Log.w(TAG, "⚠️ No GPS position received after 15s - loading fallback...")
-                try {
-                    fetchInitialPosition(deviceUniqueId)
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ Even fallback position failed: ${e.message}")
-                    _error.value = "⚠️ No se puede conectar con GPS. Verifica configuración."
-                }
-            }
-        }
+        _error.value = "🔄 Conectando GPS - Esperando posición real..."
     }
-
     // 2. NUEVA FUNCIÓN: WebSocket específico para GPS en tiempo real
     private fun connectWebSocketForRealTimeGPS(retryCount: Int = 0) {
         if (!isViewModelActive || !keepWebSocketAlive) {
@@ -555,42 +518,48 @@ class TrackingViewModel : ViewModel() {
 
     // 1. AGREGAR función handleGPSWebSocketMessage que falta:
     private fun handleGPSWebSocketMessage(message: String) {
+        // Check if we should still process messages
+        if (!isViewModelActive || !isFragmentAttached) {
+            Log.d(TAG, "🛑 Ignoring GPS message - ViewModel/Fragment inactive")
+            return
+        }
+
         try {
             val json = JSONObject(message)
             val type = json.getString("type")
+            val ourDeviceId = getDeviceUniqueId()
 
             when (type) {
                 "POSITION_UPDATE" -> {
                     val data = json.getJSONObject("data")
                     val deviceId = data.getString("deviceId")
 
-                    val ourDeviceId = getDeviceUniqueId()
                     if (deviceId == ourDeviceId) {
-                        val position = TrackingViewModel.VehiclePosition(
+                        val position = VehiclePosition(
                             deviceId = deviceId,
                             latitude = data.getDouble("latitude"),
                             longitude = data.getDouble("longitude"),
                             speed = data.optDouble("speed", 0.0),
                             bearing = data.optDouble("course", 0.0),
                             timestamp = System.currentTimeMillis(),
-                            accuracy = 8f,
-                            quality = "gps_websocket_realtime", // ✅ MARCAR COMO GPS
+                            accuracy = 5f,
+                            quality = "gps_live_real",
                             isInterpolated = false
                         )
 
-                        Log.d(
-                            SecondFragment.TAG,
-                            "🎯 GPS Real-time position: ${position.latitude}, ${position.longitude}"
-                        )
-
-                        // ✅ PROCESAR INMEDIATAMENTE
-                        processNewGPSPositionPersistent(position)
+                        // ✅ Only process if Fragment is still attached
+                        if (isFragmentAttached) {
+                            processNewGPSPositionPersistent(position)
+                            _error.value = null
+                        }
                     }
                 }
 
                 "CONNECTION_CONFIRMED" -> {
-                    Log.d(SecondFragment.TAG, "✅ GPS WebSocket subscription confirmed")
-                    _connectionStatus.value = ConnectionStatus.CONNECTED
+                    Log.d(TAG, "✅ GPS WebSocket subscription confirmed")
+                    if (isFragmentAttached) {
+                        _connectionStatus.value = ConnectionStatus.CONNECTED
+                    }
                 }
 
                 "CURRENT_POSITION" -> {
@@ -606,17 +575,18 @@ class TrackingViewModel : ViewModel() {
                         quality = "gps_current_requested"
                     )
 
-                    Log.d(
-                        SecondFragment.TAG,
-                        "📍 GPS Current position received: ${position.latitude}, ${position.longitude}"
-                    )
-                    processNewGPSPositionPersistent(position)
+                    Log.d(TAG, "📍 GPS Current position received: ${position.latitude}, ${position.longitude}")
+                    if (isFragmentAttached) {
+                        processNewGPSPositionPersistent(position)
+                    }
                 }
 
                 "ERROR" -> {
                     val errorMsg = json.optString("message", "Error GPS desconocido")
-                    Log.e(SecondFragment.TAG, "❌ GPS WebSocket error: $errorMsg")
-                    postError("Error GPS: $errorMsg")
+                    Log.e(TAG, "❌ GPS WebSocket error: $errorMsg")
+                    if (isFragmentAttached) {
+                        postError("Error GPS: $errorMsg")
+                    }
                 }
 
                 "PING" -> {
@@ -626,20 +596,55 @@ class TrackingViewModel : ViewModel() {
                         put("gpsClient", true)
                     }
                     webSocket?.send(pongMessage.toString())
-                    Log.d(SecondFragment.TAG, "💓 GPS WebSocket ping responded")
+                    Log.d(TAG, "💓 GPS WebSocket ping responded")
                 }
 
                 "PONG" -> {
-                    Log.d(SecondFragment.TAG, "💓 GPS WebSocket pong received")
+                    Log.d(TAG, "💓 GPS WebSocket pong received")
                 }
 
                 else -> {
-                    Log.d(SecondFragment.TAG, "ℹ️ GPS Unknown WebSocket message type: $type")
+                    Log.d(TAG, "ℹ️ GPS Unknown WebSocket message type: $type")
                 }
             }
 
         } catch (e: Exception) {
-            Log.e(SecondFragment.TAG, "❌ Error processing GPS WebSocket message: ${e.message}")
+            Log.e(TAG, "❌ Error processing GPS WebSocket message: ${e.message}")
+        }
+    }
+
+    // ✅ Safe context access
+    private fun getSafeContext(): Context? {
+        return try {
+            if (::context.isInitialized && isFragmentAttached) {
+                context
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Context access failed: ${e.message}")
+            null
+        }
+    }
+
+    // ✅ Notify when Fragment detaches
+    fun onFragmentDetached() {
+        Log.d(TAG, "📱 Fragment detached, marking ViewModel")
+        isFragmentAttached = false
+
+        // Keep WebSocket alive but reduce activity
+        if (keepWebSocketAlive) {
+            pauseWebSocket()
+        }
+    }
+
+    // ✅ Notify when Fragment reattaches
+    fun onFragmentAttached() {
+        Log.d(TAG, "📱 Fragment reattached, resuming ViewModel")
+        isFragmentAttached = true
+
+        if (keepWebSocketAlive) {
+            resumeWebSocket()
         }
     }
 
@@ -1201,33 +1206,19 @@ class TrackingViewModel : ViewModel() {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "✅ WebSocket conectado exitosamente")
-                isWebSocketConnected = true
-
                 val deviceUniqueId = getDeviceUniqueId()
-                if (deviceUniqueId != null) {
-                    // ✅ MENSAJE DE SUSCRIPCIÓN MEJORADO
-                    val subscribeMessage = JSONObject().apply {
-                        put("type", "SUBSCRIBE")
-                        put("deviceId", deviceUniqueId)
-                        put("timestamp", System.currentTimeMillis())
-                        put("requestRealTime", true)
-                    }
+                Log.d(TAG, "✅ GPS WebSocket CONNECTED")
+                isWebSocketConnected = true
+                _connectionStatus.value = ConnectionStatus.CONNECTED
 
-                    val success = webSocket.send(subscribeMessage.toString())
-                    Log.d(TAG, "📡 Enhanced subscription sent: $success for device: $deviceUniqueId")
-
-                    // ✅ SOLICITAR POSICIÓN INICIAL INMEDIATAMENTE
-                    webSocketScope.launch {
-                        delay(1000)
-                        val requestPosition = JSONObject().apply {
-                            put("type", "REQUEST_CURRENT_POSITION")
-                            put("deviceId", deviceUniqueId)
-                        }
-                        webSocket.send(requestPosition.toString())
-                        Log.d(TAG, "📍 Requested current position for device: $deviceUniqueId")
-                    }
+                // ✅ SOLO suscribirse - NO solicitar posición actual
+                val subscribeMessage = JSONObject().apply {
+                    put("type", "SUBSCRIBE")
+                    put("deviceId", deviceUniqueId)
+                    put("requestRealTime", true)
+                    put("waitForRealGPS", true) // ✅ AGREGAR ESTO
                 }
+                webSocket.send(subscribeMessage.toString())
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -1549,14 +1540,21 @@ class TrackingViewModel : ViewModel() {
 
     // ✅ ENHANCED: Safe zone fetching with proper error handling
     fun fetchSafeZoneFromServer() {
-        val deviceUniqueId = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-            .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
+        val safeContext = getSafeContext()
+        if (safeContext == null) {
+            Log.d(TAG, "No safe context available, skipping fetchSafeZoneFromServer")
+            return
+        }
+
+        val deviceUniqueId = safeContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            .getString(DEVICE_UNIQUE_ID_PREF, null)
 
         if (deviceUniqueId == null) {
             Log.d(TAG, "No device uniqueId, skipping fetchSafeZoneFromServer")
             return
         }
 
+        // Rest of the method remains the same...
         Log.d(TAG, "🔍 Fetching safe zone from server for uniqueId: $deviceUniqueId")
 
         safeZoneCache[deviceUniqueId]?.let { cached ->
@@ -1567,15 +1565,14 @@ class TrackingViewModel : ViewModel() {
             }
         }
 
-        val lat = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        val lat = safeContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             .getString(SecondFragment.PREF_SAFEZONE_LAT, null)?.toDoubleOrNull()
-        val lon = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        val lon = safeContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             .getString(SecondFragment.PREF_SAFEZONE_LON, null)?.toDoubleOrNull()
 
         if (lat != null && lon != null) {
             val latLng = LatLng(lat, lon)
-            safeZoneCache[deviceUniqueId] =
-                CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
+            safeZoneCache[deviceUniqueId] = CacheEntry(latLng, System.currentTimeMillis(), SAFE_ZONE_TTL)
             _safeZone.value = latLng
             Log.d(TAG, "✅ Safe zone restored from preferences: lat=$lat, lon=$lon")
             syncWithServerInBackground(deviceUniqueId)
@@ -1650,9 +1647,11 @@ class TrackingViewModel : ViewModel() {
     // ✅ FUNCIONES AUXILIARES (mantener las existentes)
     private fun getDeviceUniqueId(): String? {
         return try {
-            context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
+            val safeContext = getSafeContext() ?: return null
+            safeContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                .getString(DEVICE_UNIQUE_ID_PREF, null)
         } catch (e: Exception) {
+            Log.w(TAG, "Failed to get device unique ID: ${e.message}")
             null
         }
     }
@@ -2293,90 +2292,6 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-    // 4. AGREGAR función de carga inicial rápida:
-    @RequiresApi(Build.VERSION_CODES.O)
-    fun loadInitialVehiclePosition(deviceUniqueId: String) {
-        Log.d(TAG, "🎯 Loading initial GPS position for: $deviceUniqueId")
-
-        viewModelScope.launch {
-            try {
-                _error.value = "🔄 Cargando posición GPS..."
-
-                // ✅ ESTRATEGIA MÚLTIPLE PARA GPS
-                var position: LastPositionResponse? = null
-                var strategy: String = "unknown"
-
-                try {
-                    // Intento 1: Posición muy reciente (preferida para GPS)
-                    position = getLastPosition(
-                        deviceUniqueId = deviceUniqueId,
-                        allowOldPositions = false,
-                        maxAgeMinutes = 5
-                    )
-                    strategy = "recent_gps"
-                } catch (e: Exception) {
-                    try {
-                        // Intento 2: Posición extendida (hasta 30 min)
-                        position = getLastPosition(
-                            deviceUniqueId = deviceUniqueId,
-                            allowOldPositions = true,
-                            maxAgeMinutes = 30
-                        )
-                        strategy = "extended_gps"
-                    } catch (e2: Exception) {
-                        try {
-                            // Intento 3: Cualquier posición disponible
-                            position = getLastPosition(
-                                deviceUniqueId = deviceUniqueId,
-                                allowOldPositions = true,
-                                maxAgeMinutes = 1440
-                            )
-                            strategy = "fallback_gps"
-                        } catch (e3: Exception) {
-                            Log.e(TAG, "❌ No GPS position found: ${e3.message}")
-                            _error.value = "❌ No se encontró posición GPS"
-                            return@launch
-                        }
-                    }
-                }
-
-                if (position != null) {
-                    val vehiclePos = VehiclePosition(
-                        deviceId = deviceUniqueId,
-                        latitude = position.latitude,
-                        longitude = position.longitude,
-                        speed = position.speed,
-                        bearing = position.course,
-                        timestamp = System.currentTimeMillis(),
-                        accuracy = when (strategy) {
-                            "recent_gps" -> 5f
-                            "extended_gps" -> 15f
-                            else -> 30f
-                        },
-                        quality = "initial_gps_$strategy",
-                        isInterpolated = false
-                    )
-
-                    _vehiclePosition.value = vehiclePos
-
-                    val ageInfo: String = when {
-                        position.age == null || position.age!! < 5 -> "actual"
-                        position.age!! < 60 -> "${position.age}min"
-                        position.age!! < 1440 -> "${position.age!! / 60}h"
-                        else -> "${position.age!! / 1440}d"
-                    }
-
-                    _error.value = "✅ GPS cargado ($ageInfo)"
-                    Log.d(TAG, "✅ Initial GPS position loaded: $strategy")
-                }
-
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Error loading initial GPS position: ${e.message}")
-                _error.value = "❌ Error cargando GPS: ${e.message}"
-            }
-        }
-    }
-
     // ✅ ENHANCED: Clear old positions with better feedback
     @RequiresApi(Build.VERSION_CODES.O)
     fun clearOldPositionsAndForceRefresh(deviceUniqueId: String) {
@@ -2766,7 +2681,11 @@ class TrackingViewModel : ViewModel() {
     }
 
     private fun postError(message: String) {
-        _error.value = message
+        if (isFragmentAttached && isViewModelActive) {
+            _error.value = message
+        } else {
+            Log.d(TAG, "📝 Error message deferred (Fragment detached): $message")
+        }
     }
 
     // ============ DATA CLASSES PARA RESPONSES ============
@@ -2845,17 +2764,28 @@ class TrackingViewModel : ViewModel() {
 
         Log.d(TAG, "🧹 TrackingViewModel onCleared - CLEANING UP")
 
-        // ✅ MARCAR COMO INACTIVO
+        // ✅ 1. Mark as inactive first
         isViewModelActive = false
+        isFragmentAttached = false
         keepWebSocketAlive = false
 
-        // ✅ DETENER TRACKING
+        // ✅ 2. Stop tracking before cleaning resources
         stopRealTimeTracking()
 
-        // ✅ CANCELAR SCOPES
-        webSocketScope.cancel()
-        interpolationScope.cancel()
+        // ✅ 3. Cancel coroutine scopes
+        try {
+            webSocketScope.cancel()
+            interpolationScope.cancel()
+            networkScope.cancel()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error canceling scopes: ${e.message}")
+        }
+
+        // ✅ 4. Clear all data
+        trackingHistory.clear()
+        clearAllCaches()
 
         Log.d(TAG, "✅ TrackingViewModel cleanup completed - All resources freed")
     }
+
 }
