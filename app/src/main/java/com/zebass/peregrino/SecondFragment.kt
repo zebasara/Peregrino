@@ -82,6 +82,7 @@ import com.google.android.gms.location.Priority
 import com.zebass.peregrino.R.string
 import com.zebass.peregrino.service.BackgroundSecurityService
 import com.zebass.peregrino.service.LocationSharingService
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
 
 class SecondFragment : Fragment() {
@@ -97,6 +98,8 @@ class SecondFragment : Fragment() {
     private lateinit var sharedPreferences: SharedPreferences
     private val args: SecondFragmentArgs by navArgs()
     private val viewModel: TrackingViewModel by viewModels()
+
+    private val _vehiclePosition = MutableStateFlow<TrackingViewModel.VehiclePosition?>(null)
 
     private var isSecurityModeActive = false
     private var securityReceiver: BroadcastReceiver? = null
@@ -198,7 +201,7 @@ class SecondFragment : Fragment() {
 
     companion object {
         private var safeZone: GeoPoint? = null
-        const val GEOFENCE_RADIUS = 5.0
+        const val GEOFENCE_RADIUS = 15.0
         const val RECONNECT_DELAY = 5000L
         const val STATUS_CHECK_INTERVAL = 30000L
         const val POSITION_UPDATE_THROTTLE = 1000L
@@ -409,6 +412,45 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "Error showing position update indicator: ${e.message}")
         }
     }
+    private fun animateTraccarVehicleMarker(
+        marker: Marker,
+        newPosition: GeoPoint,
+        bearing: Double,
+        speed: Double,
+        state: VehicleState,
+        vehiclePos: TrackingViewModel.VehiclePosition
+    ) {
+        val oldPosition = marker.position
+
+        // Cancelar animación anterior
+        vehicleAnimator?.cancel()
+
+        // Animar posición
+        vehicleAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = if (speed > 5) 300 else 600 // Más fluido para GPS real
+            interpolator = AccelerateDecelerateInterpolator()
+
+            addUpdateListener { animation ->
+                val progress = animation.animatedValue as Float
+                val interpolatedLat = oldPosition.latitude +
+                        (newPosition.latitude - oldPosition.latitude) * progress
+                val interpolatedLon = oldPosition.longitude +
+                        (newPosition.longitude - oldPosition.longitude) * progress
+
+                marker.position = GeoPoint(interpolatedLat, interpolatedLon)
+                marker.icon = createTraccarVehicleIcon(bearing, speed, state, vehiclePos)
+
+                map?.invalidate()
+            }
+
+            start()
+        }
+
+        // Actualizar información del marcador
+        marker.snippet = buildTraccarMarkerInfo(vehiclePos, speed, bearing)
+
+        Log.d(TAG, "🎬 Traccar vehicle marker animated to new position")
+    }
 
     // ✅ NUEVA FUNCIÓN: ACTUALIZAR ESTADO DE CONEXIÓN WEBSOCKET
     private fun updateConnectionStatusUI(status: TrackingViewModel.ConnectionStatus) {
@@ -443,75 +485,64 @@ class SecondFragment : Fragment() {
     // ✅ NUEVA FUNCIÓN: INICIAR SERVICIOS DE TRACKING PERSISTENTE
     @RequiresApi(Build.VERSION_CODES.O)
     private suspend fun startPersistentTrackingServices() = withContext(Dispatchers.IO) {
-        Log.d(TAG, "🚀 Starting PERSISTENT tracking services...")
+        Log.d(TAG, "🚀 Starting PERSISTENT Traccar GPS tracking services")
 
         try {
-            // ✅ PASO 1: Iniciar servicio de tracking
+            // ✅ PASO 1: VERIFICAR CONEXIÓN A TRACCAR
             launch {
-                Log.d(TAG, "📱 Starting tracking service...")
-                startTrackingService()
+                Log.d(TAG, "🔍 Step 1: Verifying Traccar connection...")
+                val deviceUniqueId = getDeviceUniqueId()
+                if (deviceUniqueId != null) {
+                    // Probar conexión directa con Traccar
+                    delay(500)
+                    Log.d(TAG, "📡 Testing Traccar WebSocket for real-time GPS...")
+                }
             }
 
-            delay(1000)
-
-            // ✅ PASO 2: Iniciar tracking en tiempo real PERSISTENTE
+            // ✅ PASO 2: INICIAR WEBSOCKET PRIORITARIO PARA TRACCAR
             launch {
-                Log.d(TAG, "🎯 Starting PERSISTENT real-time tracking...")
+                Log.d(TAG, "🔌 Step 2: Starting PRIORITY WebSocket for Traccar GPS...")
                 viewModel.startRealTimeTracking(loadInitialPosition = true)
+                delay(2000)
+
+                // ✅ FORZAR SUSCRIPCIÓN A DISPOSITIVO
+                getDeviceUniqueId()?.let { uniqueId ->
+                    Log.d(TAG, "📡 Forcing subscription to Traccar device: $uniqueId")
+                    viewModel.forceReconnectWebSocket()
+                }
             }
 
-            delay(1500)
+            delay(3000)
 
-            // ✅ PASO 3: Cargar posición inicial si es necesario
+            // ✅ PASO 3: VERIFICAR QUE RECIBIMOS DATOS
             launch {
-                Log.d(TAG, "📍 Loading initial position...")
-                getDeviceUniqueId()?.let { uniqueId ->
-                    try {
-                        val position = viewModel.getLastPosition(uniqueId, allowOldPositions = true, maxAgeMinutes = 1440)
-                        val geoPoint = GeoPoint(position.latitude, position.longitude)
+                Log.d(TAG, "🔍 Step 3: Verifying GPS data reception...")
+                delay(5000)
 
-                        withContext(Dispatchers.Main) {
-                            updateVehiclePositionEnhanced(
-                                TrackingViewModel.VehiclePosition(
-                                    deviceId = uniqueId,
-                                    latitude = position.latitude,
-                                    longitude = position.longitude,
-                                    speed = position.speed,
-                                    bearing = position.course,
-                                    timestamp = System.currentTimeMillis(),
-                                    accuracy = 15f,
-                                    quality = "initial_load"
-                                )
-                            )
-                            showSnackbar("📍 Vehículo cargado en el mapa", Snackbar.LENGTH_SHORT)
-                        }
+                if (_vehiclePosition.value == null) {
+                    Log.w(TAG, "⚠️ No GPS data received from Traccar - investigating...")
 
-                        Log.d(TAG, "✅ Initial position loaded and displayed")
+                    // ✅ INVESTIGAR PROBLEMA
+                    withContext(Dispatchers.Main) {
+                        showSnackbar("⚠️ Verificando conexión con GPS...", Snackbar.LENGTH_LONG)
+                    }
 
-                    } catch (e: Exception) {
-                        Log.e(TAG, "❌ Error loading initial position: ${e.message}")
-                        withContext(Dispatchers.Main) {
-                            showSnackbar("⚠️ Error cargando posición inicial", Snackbar.LENGTH_LONG)
-                        }
+                    // Intentar carga manual
+                    forceLoadInitialPosition()
+                } else {
+                    Log.d(TAG, "✅ GPS data flowing from Traccar successfully!")
+                    withContext(Dispatchers.Main) {
+                        showSnackbar("📡 GPS conectado - Datos en tiempo real", Snackbar.LENGTH_SHORT)
                     }
                 }
             }
 
-            delay(2000)
-
-            // ✅ PASO 4: Configurar tareas periódicas
-            launch {
-                Log.d(TAG, "⏰ Starting periodic tasks...")
-                schedulePeriodicSync()
-                startPeriodicStatusCheck()
-            }
-
-            Log.d(TAG, "✅ All PERSISTENT tracking services started successfully")
+            Log.d(TAG, "✅ All PERSISTENT Traccar GPS services started successfully")
 
         } catch (error: Exception) {
-            Log.e(TAG, "❌ Error starting PERSISTENT services: ${error.message}")
+            Log.e(TAG, "❌ Error starting Traccar GPS services: ${error.message}")
             withContext(Dispatchers.Main) {
-                showSnackbar("❌ Error iniciando servicios: ${error.message}", Snackbar.LENGTH_LONG)
+                showSnackbar("❌ Error conectando GPS: ${error.message}", Snackbar.LENGTH_LONG)
             }
         }
     }
@@ -592,33 +623,47 @@ class SecondFragment : Fragment() {
     // ============ OBSERVADORES MEJORADOS ============
     @RequiresApi(Build.VERSION_CODES.O)
     private fun observeViewModel() {
-        // ✅ OBSERVAR POSICIÓN DEL VEHÍCULO CON ACTUALIZACIÓN INMEDIATA
         lifecycleScope.launch {
             viewModel.vehiclePosition.collectLatest { position ->
                 if (position != null) {
-                    Log.d(
-                        TAG,
-                        "🎯 NEW POSITION RECEIVED: lat=${position.latitude}, lon=${position.longitude}, quality=${position.quality}"
-                    )
+                    Log.d(TAG, "🎯 TRACCAR POSITION RECEIVED: lat=${position.latitude}, lon=${position.longitude}, quality=${position.quality}")
 
-                    // ✅ ACTUALIZAR INMEDIATAMENTE SIN THROTTLE PARA DATOS REALES
-                    if (!position.isInterpolated) {
-                        updateVehiclePositionEnhanced(position)
-                    } else {
-                        // Solo throttle para interpolación
-                        val currentTime = System.currentTimeMillis()
-                        if (currentTime - lastMapUpdate > 100L) { // 100ms para interpolación
-                            updateVehiclePositionEnhanced(position)
-                        }
+                    // ✅ ACTUALIZAR INMEDIATAMENTE - DATOS DE TRACCAR SON PRIORITARIOS
+                    updateVehiclePositionEnhanced(position)
+
+                    // ✅ MOSTRAR NOTIFICACIÓN SOLO PARA DATOS REALES
+                    if (!position.isInterpolated && position.quality.contains("realtime")) {
+                        showPositionUpdateIndicator()
+                        Log.d(TAG, "📍 REAL-TIME GPS UPDATE from Traccar!")
                     }
                 } else {
-                    // ✅ Si no hay posición después de 5 segundos, forzar carga
+                    Log.w(TAG, "⚠️ No vehicle position from Traccar - checking connection...")
+
+                    // ✅ VERIFICAR CONEXIÓN WEBSOCKET
                     handler.postDelayed({
-                        if (vehicleMarker.get() == null) {
-                            Log.w(TAG, "⚠️ No vehicle position after timeout, forcing load...")
+                        if (vehicleMarker.get() == null && isFragmentVisible) {
+                            Log.w(TAG, "🔄 No vehicle visible after timeout, forcing reconnection...")
+                            viewModel.forceReconnectWebSocket()
                             forceLoadInitialPosition()
                         }
-                    }, 5000) // Reducido a 5 segundos
+                    }, 10000) // 10 segundos
+                }
+            }
+        }
+
+        // ✅ OBSERVAR ESTADO DE CONEXIÓN CRÍTICO
+        lifecycleScope.launch {
+            viewModel.connectionStatus.collectLatest { status ->
+                updateConnectionStatusUI(status)
+
+                // ✅ SI SE DESCONECTA, INTENTAR RECONECTAR INMEDIATAMENTE
+                if (status == TrackingViewModel.ConnectionStatus.DISCONNECTED) {
+                    Log.w(TAG, "🔴 WebSocket disconnected - attempting immediate reconnection...")
+                    handler.postDelayed({
+                        if (hasAssociatedDevice()) {
+                            viewModel.forceReconnectWebSocket()
+                        }
+                    }, 2000)
                 }
             }
         }
@@ -660,62 +705,215 @@ class SecondFragment : Fragment() {
     // ============ ACTUALIZACIÓN MEJORADA DE POSICIÓN DEL VEHÍCULO ============
     private fun updateVehiclePositionEnhanced(position: TrackingViewModel.VehiclePosition) {
         if (!isMapReady.get()) {
-            Log.w(TAG, "⚠️ Map not ready, skipping position update")
+            Log.w(TAG, "⚠️ Map not ready for Traccar position update")
             return
         }
 
         val currentTime = System.currentTimeMillis()
 
-        // ✅ ACTUALIZAR TIMESTAMP INMEDIATAMENTE PARA DATOS REALES
-        if (!position.isInterpolated) {
-            lastMapUpdate = currentTime
-            Log.d(TAG, "✅ REAL DATA: Updating position immediately")
-        } else {
-            // ✅ THROTTLE SOLO PARA INTERPOLACIÓN
-            if (currentTime - lastMapUpdate < 50L) {
-                return
-            }
-            lastMapUpdate = currentTime
-            Log.d(TAG, "🔄 INTERPOLATED: Updating with throttle")
-        }
+        // ✅ SIEMPRE ACTUALIZAR DATOS DE TRACCAR INMEDIATAMENTE
+        Log.d(TAG, "📍 PROCESSING TRACCAR GPS: lat=${position.latitude}, lon=${position.longitude}")
 
         val newPoint = GeoPoint(position.latitude, position.longitude)
 
-        // ✅ AQUÍ - cuando detectes posición inválida
-        if (!isValidPosition(newPoint)) {
-            Log.w(TAG, "⚠️ Invalid position detected, clearing old GPS data")
-            clearOldGPSData() // ← LLAMAR AQUÍ
+        // ✅ VALIDAR POSICIÓN ANTES DE MOSTRAR
+        if (!isValidTraccarPosition(newPoint, position)) {
+            Log.w(TAG, "❌ Invalid Traccar position rejected: lat=${position.latitude}, lon=${position.longitude}")
             return
         }
-        // ✅ VALIDAR COORDENADAS ANTES DE ACTUALIZAR
-        if (isValidPosition(newPoint)) {
-            val newState = determineVehicleState(newPoint)
-            updateVehicleMarkerSmooth(newPoint, position.bearing, position.speed, newState)
 
-            // ✅ SEGUIMIENTO AUTOMÁTICO
-            if (isFollowingVehicle.get()) {
-                smoothMoveMapToPosition(newPoint, position.bearing)
+        val newState = determineVehicleState(newPoint)
+
+        // ✅ ACTUALIZAR MARCADOR CON DATOS DE TRACCAR
+        updateVehicleMarkerFromTraccar(newPoint, position.bearing, position.speed, newState, position)
+
+        // ✅ SEGUIMIENTO AUTOMÁTICO SOLO CON DATOS REALES
+        if (isFollowingVehicle.get()) {
+            smoothMoveMapToPosition(newPoint, position.bearing)
+        }
+
+        // ✅ VERIFICAR ZONA SEGURA SOLO CON DATOS NO INTERPOLADOS
+        if (!position.isInterpolated) {
+            checkSafeZone(newPoint, position.deviceId.hashCode())
+        }
+
+        updatePositionInfo(position)
+        lastPositionCache.set(newPoint)
+
+        Log.d(TAG, "✅ Traccar position displayed: quality=${position.quality}, speed=${position.speed}km/h")
+    }
+    // 5. NUEVA FUNCIÓN - Validar posición de Traccar
+    private fun isValidTraccarPosition(position: GeoPoint, vehiclePos: TrackingViewModel.VehiclePosition): Boolean {
+        // ✅ VALIDACIONES ESPECÍFICAS PARA TRACCAR
+        if (position.latitude == 0.0 && position.longitude == 0.0) {
+            Log.w(TAG, "❌ Traccar sent 0,0 coordinates - rejecting")
+            return false
+        }
+
+        if (position.latitude < -90.0 || position.latitude > 90.0 ||
+            position.longitude < -180.0 || position.longitude > 180.0) {
+            Log.w(TAG, "❌ Traccar coordinates out of range - rejecting")
+            return false
+        }
+
+        // ✅ RECHAZAR POSICIONES HARDCODEADAS/FALLBACK
+        if (position.latitude == TANDIL_LAT && position.longitude == TANDIL_LON) {
+            Log.w(TAG, "❌ Traccar sent hardcoded Tandil coordinates - rejecting")
+            return false
+        }
+
+        // ✅ VERIFICAR DISTANCIA EXCESIVA (más de 500km de salto)
+        val lastKnown = lastPositionCache.get()
+        if (lastKnown != null) {
+            val distance = position.distanceToAsDouble(lastKnown)
+            if (distance > 500000) { // 500km
+                Log.w(TAG, "❌ Traccar position jump too large: ${distance}m - rejecting")
+                return false
+            }
+        }
+
+        return true
+    }
+
+    // 6. NUEVA FUNCIÓN - Marcador específico para datos de Traccar
+    private fun updateVehicleMarkerFromTraccar(
+        position: GeoPoint,
+        bearing: Double,
+        speed: Double,
+        state: VehicleState,
+        vehiclePos: TrackingViewModel.VehiclePosition
+    ) {
+        try {
+            var marker = vehicleMarker.get()
+
+            if (marker == null) {
+                // ✅ CREAR MARCADOR ESPECÍFICO PARA TRACCAR
+                marker = createTraccarVehicleMarker(position, bearing, speed, state, vehiclePos)
+                vehicleMarker.set(marker)
+                map?.overlays?.add(marker)
+
+                // ✅ CENTRAR SOLO EN EL PRIMER MARCADOR DE TRACCAR
+                if (isFollowingVehicle.get()) {
+                    map?.controller?.animateTo(position, FOLLOW_ZOOM_LEVEL, 1500L)
+                    Log.d(TAG, "🎯 Centered map on first Traccar position")
+                }
+            } else {
+                // ✅ ANIMAR MOVIMIENTO CON DATOS DE TRACCAR
+                animateTraccarVehicleMarker(marker, position, bearing, speed, state, vehiclePos)
             }
 
-            // ✅ VERIFICAR ZONA SEGURA SOLO CON DATOS REALES
-            if (!position.isInterpolated) {
-                checkSafeZone(newPoint, position.deviceId.hashCode())
-            }
+            map?.invalidate()
+            Log.d(TAG, "🚗 Vehicle marker updated from Traccar data")
 
-            updatePositionInfo(position)
-
-            // ✅ ACTUALIZAR CACHE DE ÚLTIMA POSICIÓN
-            lastPositionCache.set(newPoint)
-
-            Log.d(TAG, "✅ Position updated successfully: ${position.quality}")
-
-        } else {
-            Log.w(
-                TAG,
-                "⚠️ Invalid position received: lat=${position.latitude}, lon=${position.longitude}"
-            )
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error updating Traccar vehicle marker: ${e.message}")
         }
     }
+
+
+    // 7. NUEVA FUNCIÓN - Crear marcador específico para Traccar
+    private fun createTraccarVehicleMarker(
+        position: GeoPoint,
+        bearing: Double,
+        speed: Double,
+        state: VehicleState,
+        vehiclePos: TrackingViewModel.VehiclePosition
+    ): Marker {
+        return Marker(map).apply {
+            this.position = position
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            icon = createTraccarVehicleIcon(bearing, speed, state, vehiclePos)
+            title = "🚗 Vehículo GPS (Traccar)"
+            snippet = buildTraccarMarkerInfo(vehiclePos, speed, bearing)
+            isDraggable = false
+            setInfoWindow(null)
+        }
+    }
+
+    // 8. NUEVA FUNCIÓN - Ícono específico para Traccar
+    private fun createTraccarVehicleIcon(
+        bearing: Double,
+        speed: Double,
+        state: VehicleState,
+        vehiclePos: TrackingViewModel.VehiclePosition
+    ): android.graphics.drawable.Drawable {
+        val size = 64 // Tamaño más grande para Traccar
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        val paint = Paint().apply {
+            isAntiAlias = true
+            style = Paint.Style.FILL
+        }
+
+        val center = size / 2f
+
+        // ✅ COLOR ESPECÍFICO PARA DATOS DE TRACCAR
+        val vehicleColor = when {
+            !vehiclePos.isInterpolated && vehiclePos.quality.contains("realtime") -> Color.GREEN // Tiempo real
+            vehiclePos.quality.contains("websocket") -> Color.CYAN // WebSocket
+            vehiclePos.isInterpolated -> Color.YELLOW // Interpolado
+            state == VehicleState.OUTSIDE_SAFE_ZONE -> Color.RED // Fuera de zona
+            else -> Color.BLUE // Default Traccar
+        }
+
+        // Círculo principal más grande
+        paint.color = vehicleColor
+        canvas.drawCircle(center, center, 22f, paint)
+
+        // Borde blanco grueso
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 4f
+        paint.color = Color.WHITE
+        canvas.drawCircle(center, center, 22f, paint)
+
+        // ✅ FLECHA MÁS GRANDE PARA DIRECCIÓN
+        paint.style = Paint.Style.FILL
+        paint.color = Color.WHITE
+
+        canvas.save()
+        canvas.rotate(bearing.toFloat(), center, center)
+
+        val path = Path().apply {
+            moveTo(center, center - 16)      // Flecha más grande
+            lineTo(center - 8, center + 8)
+            lineTo(center + 8, center + 8)
+            close()
+        }
+        canvas.drawPath(path, paint)
+        canvas.restore()
+
+        // ✅ INDICADOR DE CALIDAD DE DATOS
+        paint.style = Paint.Style.FILL
+        paint.color = when {
+            vehiclePos.quality.contains("realtime") -> Color.GREEN
+            vehiclePos.quality.contains("websocket") -> Color.CYAN
+            vehiclePos.isInterpolated -> Color.YELLOW
+            else -> Color.GRAY
+        }
+        canvas.drawCircle(center + 18, center - 18, 6f, paint)
+
+        return BitmapDrawable(resources, bitmap)
+    }
+
+    // 9. NUEVA FUNCIÓN - Info del marcador para Traccar
+    private fun buildTraccarMarkerInfo(
+        vehiclePos: TrackingViewModel.VehiclePosition,
+        speed: Double,
+        bearing: Double
+    ): String {
+        return buildString {
+            appendLine("🚗 Vehículo GPS desde Traccar")
+            appendLine("📍 Velocidad: ${String.format("%.1f", speed)} km/h")
+            appendLine("🧭 Dirección: ${String.format("%.0f", bearing)}°")
+            appendLine("📡 Calidad: ${vehiclePos.quality}")
+            appendLine("⏰ Tiempo: ${if (vehiclePos.isInterpolated) "Interpolado" else "Real"}")
+            if (vehiclePos.accuracy > 0) {
+                appendLine("🎯 Precisión: ${vehiclePos.accuracy.toInt()}m")
+            }
+        }
+    }
+
 
     // ✅ NUEVA FUNCIÓN: VALIDAR POSICIÓN
     private fun isValidPosition(position: GeoPoint): Boolean {
@@ -1731,12 +1929,13 @@ class SecondFragment : Fragment() {
 
     @SuppressLint("MissingPermission")
     private fun centerOnMyLocation() {
+        // ✅ MOSTRAR UBICACIÓN DEL MÓVIL TEMPORALMENTE, NO PERMANENTE
         if (!hasLocationPermission()) {
             showSnackbar("⚠️ Se necesitan permisos de ubicación", Snackbar.LENGTH_SHORT)
             return
         }
 
-        showSnackbar("📍 Obteniendo tu ubicación...", Snackbar.LENGTH_SHORT)
+        showSnackbar("📍 Obteniendo tu ubicación actual...", Snackbar.LENGTH_SHORT)
 
         fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
             .addOnSuccessListener { location ->
@@ -1747,9 +1946,33 @@ class SecondFragment : Fragment() {
                     isFollowingVehicle.set(false)
                     updateFollowButtonText()
 
-                    // ✅ IR A MI UBICACIÓN
+                    // ✅ IR A MI UBICACIÓN (MÓVIL) TEMPORALMENTE
                     map?.controller?.animateTo(myPosition, 18.0, 1200L)
-                    showSnackbar("📍 Tu ubicación GPS", Snackbar.LENGTH_SHORT)
+
+                    // ✅ MOSTRAR MARCADOR TEMPORAL (NO PERMANENTE)
+                    val tempMarker = Marker(map).apply {
+                        position = myPosition
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        title = "📱 Tu ubicación actual"
+                        snippet = "Ubicación del móvil (temporal)"
+                        icon = ContextCompat.getDrawable(requireContext(), R.drawable.ic_my_location)
+                    }
+
+                    map?.overlays?.add(tempMarker)
+                    map?.invalidate()
+
+                    showSnackbar("📍 Tu ubicación actual mostrada", Snackbar.LENGTH_SHORT)
+
+                    // ✅ REMOVER MARCADOR TEMPORAL DESPUÉS DE 10 SEGUNDOS
+                    handler.postDelayed({
+                        try {
+                            map?.overlays?.remove(tempMarker)
+                            map?.invalidate()
+                            Log.d(TAG, "🧹 Temporary location marker removed")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error removing temporary marker: ${e.message}")
+                        }
+                    }, 10000)
 
                 } else {
                     showSnackbar("⚠️ No se pudo obtener tu ubicación", Snackbar.LENGTH_SHORT)
@@ -1772,7 +1995,6 @@ class SecondFragment : Fragment() {
                         val shareId = intent.getStringExtra("shareId")
                         Log.d(TAG, "📨 Location sharing stopped: $shareId")
 
-                        // ✅ Actualizar UI
                         currentShareId = null
                         isCurrentlySharingLocation = false
                         updateSharingButton(false, "")
@@ -1788,25 +2010,24 @@ class SecondFragment : Fragment() {
             addAction("com.peregrino.LOCATION_SHARING_STOPPED")
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.registerReceiver(
-                requireContext(),
-                webSocketReceiver,
-                filter,
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-        } else {
-            ContextCompat.registerReceiver(
-                requireContext(),
-                webSocketReceiver,
-                filter,
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
+        // ✅ FIX: AGREGAR FLAGS CORRECTOS
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.registerReceiver(
+                    requireContext(),
+                    webSocketReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED  // ✅ AGREGAR FLAG
+                )
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                requireContext().registerReceiver(webSocketReceiver, filter)
+            }
+            Log.d(TAG, "✅ WebSocket receiver registered with proper flags")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error registering WebSocket receiver: ${e.message}")
         }
-
-        Log.d(TAG, "✅ WebSocket receiver registered")
     }
-
     // En onPause(), agregar el desregistro:
     private fun unregisterWebSocketReceiver() {
         webSocketReceiver?.let { receiver ->
@@ -1914,7 +2135,7 @@ class SecondFragment : Fragment() {
 
     @SuppressLint("MissingPermission")
     private fun enableMyLocation() {
-        if (!hasLocationPermission()) {
+        /*if (!hasLocationPermission()) {
             locationPermissionLauncher.launch(
                 arrayOf(
                     Manifest.permission.ACCESS_FINE_LOCATION,
@@ -1937,22 +2158,44 @@ class SecondFragment : Fragment() {
             // ✅ AGREGAR AL OVERLAY PARA MOSTRAR PUNTO AZUL
             map?.overlays?.add(myLocationOverlay)
         }
+        */
+        // ✅ NUEVA IMPLEMENTACIÓN - SOLO PARA PERMISOS, NO PARA MOSTRAR UBICACIÓN LOCAL
+        if (!hasLocationPermission()) {
+            Log.d(TAG, "🔐 Requesting location permissions for GPS access...")
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+            return
+        }
 
-        map?.invalidate()
-        Log.d(TAG, "✅ My location enabled - solo punto azul")
+        Log.d(TAG, "✅ Location permissions granted - GPS ready for Traccar data")
+        // NO agregar overlay de ubicación local - solo usar datos de Traccar
     }
 
 
     private fun cleanupTrackingOverlays() {
         try {
+            // ✅ SOLO REMOVER OVERLAYS ESPECÍFICOS, NO EL MARCADOR DEL VEHÍCULO
+            val overlaysToRemove = mutableListOf<org.osmdroid.views.overlay.Overlay>()
 
-            // ✅ REMOVER TODOS LOS OVERLAYS EXCEPTO MARCADORES Y RASTRO DEL VEHÍCULO
-            map?.overlays?.removeAll { overlay ->
-                overlay !is Marker && overlay != safeZonePolygon.get()
+            map?.overlays?.forEach { overlay ->
+                // Solo remover overlays problemáticos, NO marcadores ni zona segura
+                if (overlay is MyLocationNewOverlay) {
+                    overlaysToRemove.add(overlay)
+                    Log.d(TAG, "🧹 Removing MyLocationOverlay (conflicts with Traccar)")
+                }
             }
-            map?.invalidate()
 
-            Log.d(TAG, "✅ Cleaned up tracking overlays")
+            overlaysToRemove.forEach { overlay ->
+                map?.overlays?.remove(overlay)
+            }
+
+            // ✅ NO TOCAR vehicleMarker ni safeZonePolygon
+            map?.invalidate()
+            Log.d(TAG, "✅ Cleaned up conflicting overlays only")
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error cleaning overlays: ${e.message}")
@@ -2317,17 +2560,24 @@ class SecondFragment : Fragment() {
         safeZoneCenter = position
         safeZonePolygon.get()?.let { map?.overlays?.remove(it) }
 
+        // ✅ FIX CRÍTICO: Radio correcto para zona segura
+        val radiusInMeters = 15.0 // 15 metros
+
         val polygon = Polygon().apply {
-            points = Polygon.pointsAsCircle(position, GEOFENCE_RADIUS)
-            fillColor = 0x33007FFF
+            // ✅ CREAR CÍRCULO PERFECTO ALREDEDOR DEL VEHÍCULO
+            points = Polygon.pointsAsCircle(position, radiusInMeters)
+            fillColor = 0x33007FFF // Azul semi-transparente
             strokeColor = Color.BLUE
-            strokeWidth = 4f
+            strokeWidth = 3f
+            title = "Zona Segura (${radiusInMeters.toInt()}m)"
         }
 
         safeZonePolygon.set(polygon)
         map?.overlays?.add(polygon)
         updateSafeZoneButton(true)
         map?.invalidate()
+
+        Log.d(TAG, "✅ Safe zone created: center=${position.latitude},${position.longitude}, radius=${radiusInMeters}m")
     }
 
     private fun updateSafeZoneButton(active: Boolean) {
@@ -2345,12 +2595,17 @@ class SecondFragment : Fragment() {
     private fun checkSafeZone(position: GeoPoint, deviceId: Int) {
         safeZoneCenter?.let { center ->
             val distance = calculateAccurateDistance(center, position)
+            val radiusMeters = 15.0 // ✅ MISMO RADIO QUE EN updateSafeZoneUI
 
-            if (distance > GEOFENCE_RADIUS) {
+            Log.d(TAG, "🔍 Safe zone check: distance=${String.format("%.1f", distance)}m, limit=${radiusMeters}m")
+
+            if (distance > radiusMeters) {
+                Log.w(TAG, "🚨 VEHICLE OUTSIDE SAFE ZONE: ${String.format("%.1f", distance)}m")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     triggerAlarm(deviceId, distance)
                 }
             } else {
+                Log.d(TAG, "✅ Vehicle inside safe zone: ${String.format("%.1f", distance)}m")
                 stopAlarmIfActive()
             }
         }
@@ -3327,16 +3582,19 @@ class SecondFragment : Fragment() {
                 addAction("com.peregrino.SAFEZONE_ALERT")
             }
 
+            // ✅ FIX: AGREGAR FLAGS CORRECTOS
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 ContextCompat.registerReceiver(
                     requireContext(),
                     safeZoneReceiver,
                     filter,
-                    ContextCompat.RECEIVER_NOT_EXPORTED
+                    ContextCompat.RECEIVER_NOT_EXPORTED  // ✅ AGREGAR FLAG
                 )
             } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
                 requireContext().registerReceiver(safeZoneReceiver, filter)
             }
+            Log.d(TAG, "✅ SafeZone receiver registered with proper flags")
         } catch (e: Exception) {
             Log.w(TAG, "Error registering safe zone receiver: ${e.message}")
         }
@@ -3483,6 +3741,7 @@ class SecondFragment : Fragment() {
     }
 
     // ✅ FUNCIÓN PARA REGISTRAR RECEIVER DE SEGURIDAD
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private fun registerSecurityReceiver() {
         securityReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -3494,14 +3753,12 @@ class SecondFragment : Fragment() {
 
                         Log.w(TAG, "🚨 Security alert received: distance=${distance}m, device=$deviceId")
 
-                        // ✅ MOSTRAR ALERTA EN LA APP SI ESTÁ ABIERTA
                         lifecycleScope.launch(Dispatchers.Main) {
                             showSnackbar(
                                 "🚨 ALERTA: Vehículo fuera de zona (${distance.toInt()}m)",
                                 Snackbar.LENGTH_LONG
                             )
 
-                            // ✅ HACER VIBRAR EL TELÉFONO
                             val vibrator = requireContext().getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 vibrator?.vibrate(VibrationEffect.createOneShot(1000, VibrationEffect.DEFAULT_AMPLITUDE))
@@ -3526,18 +3783,23 @@ class SecondFragment : Fragment() {
             addAction("com.peregrino.SAFEZONE_DISABLED")
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.registerReceiver(
-                requireContext(),
-                securityReceiver,
-                filter,
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-        } else {
-            requireContext().registerReceiver(securityReceiver, filter)
+        // ✅ FIX: AGREGAR FLAGS CORRECTOS
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.registerReceiver(
+                    requireContext(),
+                    securityReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED  // ✅ AGREGAR FLAG
+                )
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                requireContext().registerReceiver(securityReceiver, filter)
+            }
+            Log.d(TAG, "✅ Security receiver registered with proper flags")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error registering security receiver: ${e.message}")
         }
-
-        Log.d(TAG, "✅ Security receiver registered")
     }
 
     private fun unregisterSecurityReceiver() {
@@ -3602,6 +3864,7 @@ class SecondFragment : Fragment() {
         requireContext().startService(intent)
         showSnackbar("🔇 Modo seguridad silencioso activado", Snackbar.LENGTH_SHORT)
     }
+
     // ============ LIFECYCLE METHODS ============
     override fun onResume() {
         super.onResume()
