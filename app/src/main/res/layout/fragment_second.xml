@@ -429,7 +429,7 @@
 
             <!-- Botón Config GPS -->
             <androidx.cardview.widget.CardView
-                android:id="@+id/buttonShowConfig"
+                android:id="@+id/buttonShowUbicacion"
                 android:layout_width="0dp"
                 android:layout_height="90dp"
                 android:layout_weight="1"
@@ -456,7 +456,7 @@
                         <ImageView
                             android:layout_width="28dp"
                             android:layout_height="28dp"
-                            android:src="@drawable/ic_settings_modern"
+                            android:src="@drawable/button_share_gradient"
                             app:tint="@android:color/white"
                             android:layout_marginBottom="6dp"
                             android:scaleType="fitCenter" />
@@ -464,14 +464,14 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Config\nGPS"
-                            android:textColor="@android:color/white"
-                            android:textSize="11sp"
-                            android:textStyle="bold"
+                            android:ellipsize="end"
                             android:gravity="center"
                             android:lineSpacingMultiplier="1.1"
                             android:maxLines="2"
-                            android:ellipsize="end" />
+                            android:text="Compartir Ubicacion"
+                            android:textColor="@android:color/white"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
 
                     </LinearLayout>
 

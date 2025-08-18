@@ -1,6 +1,46 @@
 <resources>
     <string name="app_name">Peregrino</string>
     <string name="action_settings">Settings</string>
+
+    <!-- ✅ NUEVOS STRINGS PARA COMPARTIR UBICACIÓN -->
+    <string name="location_sharing_channel_name">Compartir Ubicación</string>
+    <string name="location_sharing_channel_description">Notificaciones para compartir ubicación en tiempo real</string>
+    <string name="location_sharing_notification_title">🌍 Compartiendo Ubicación</string>
+    <string name="location_sharing_notification_text">Tu ubicación se está compartiendo en tiempo real</string>
+    <string name="location_sharing_stop_action">Detener</string>
+
+    <string name="stop_sharing">🛑 Detener Compartir</string>
+    <string name="start_sharing">🌍 Compartir Ubicación</string>
+
+    <string name="share_location_10min">📍 Compartir por 10 minutos</string>
+    <string name="share_location_30min">📍 Compartir por 30 minutos</string>
+    <string name="share_location_1hour">📍 Compartir por 1 hora</string>
+    <string name="share_location_2hours">📍 Compartir por 2 horas</string>
+    <string name="share_location_8hours">📍 Compartir por 8 horas</string>
+    <string name="share_location_indefinite">📍 Compartir hasta que detenga</string>
+
+    <string name="sharing_success_title">✅ Ubicación Compartida</string>
+    <string name="sharing_success_message">🌍 Tu ubicación se está compartiendo por %1$s\n\n🔗 Enlace: %2$s</string>
+    <string name="sharing_whatsapp_button">📱 Compartir por WhatsApp</string>
+    <string name="sharing_copy_link_button">📋 Copiar Enlace</string>
+
+    <string name="stop_sharing_title">🛑 Detener Compartir Ubicación</string>
+    <string name="stop_sharing_message">Ubicación compartida por: %1$s\n\n¿Quieres detener el compartir ubicación?</string>
+    <string name="stop_sharing_confirm">🛑 Sí, Detener</string>
+    <string name="stop_sharing_cancel">↩️ Continuar Compartiendo</string>
+
+    <string name="sharing_button_active">🛑 Detener Compartir</string>
+    <string name="sharing_button_inactive">🌍 Compartir Ubicación</string>
+
+    <string name="error_no_location_permission">⚠️ Se necesitan permisos de ubicación para compartir</string>
+    <string name="error_no_device_associated">❌ No hay dispositivo asociado</string>
+    <string name="error_starting_sharing">❌ Error iniciando compartir: %1$s</string>
+    <string name="error_no_sharing_apps">❌ No hay apps disponibles para compartir</string>
+
+    <string name="sharing_starting">🔄 Iniciando compartir ubicación...</string>
+    <string name="sharing_stopped">🛑 Compartir ubicación detenido</string>
+    <string name="sharing_link_copied">📋 Enlace copiado al portapapeles</string>
+
     <!-- Strings used for fragments for navigation -->
     <string name="first_fragment_label">First Fragment</string>
     <string name="second_fragment_label">Second Fragment</string>

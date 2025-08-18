@@ -56,24 +56,45 @@ class TrackingViewModel : ViewModel() {
     private val _deviceInfo = MutableStateFlow<String?>(null)
     val deviceInfo: StateFlow<String?> = _deviceInfo.asStateFlow()
 
+    // ✅ NUEVO: ESTADO DE CONEXIÓN WEBSOCKET
+    private val _connectionStatus = MutableStateFlow<ConnectionStatus>(ConnectionStatus.DISCONNECTED)
+    val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
+
+
     // ============ NUEVO: SISTEMA DE INTERPOLACIÓN Y KALMAN FILTER ============
     private var kalmanFilter: VehicleKalmanFilter? = null
     private var lastGPSPosition: VehiclePosition? = null
     private var interpolationJob: Job? = null
     private val interpolationScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
-    // ============ WEBSOCKET PARA TIEMPO REAL ============
+    // ============ WEBSOCKET PERSISTENTE MEJORADO ============
     private var webSocket: WebSocket? = null
     private var isWebSocketConnected = false
     private val webSocketScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var reconnectJob: Job? = null
+    private var reconnectAttempts = 0
+    private val maxReconnectAttempts = 10
+    private var lastConnectionTime = 0L
+    private val minReconnectDelay = 1000L
+
+    enum class ConnectionStatus {
+        DISCONNECTED,
+        CONNECTING,
+        CONNECTED,
+        RECONNECTING,
+        ERROR
+    }
+
+    // ✅ CRÍTICO: WebSocket debe sobrevivir cambios de fragmento
+    private var isViewModelActive = true
+    private var keepWebSocketAlive = false
 
     // ============ VARIABLES DE TRACKING ============
     private var isTrackingActive = false
     private var lastUpdateTime = 0L
     private val trackingHistory = mutableListOf<VehiclePosition>()
     private val maxHistorySize = 100
-
-    // ✅ CRITICAL FIX: Enhanced HTTP Client with better error handling
+    // ✅ CRITICAL FIX: Enhanced HTTP Client
     private val client by lazy {
         OkHttpClient.Builder().apply {
             connectTimeout(10, TimeUnit.SECONDS)
@@ -82,7 +103,6 @@ class TrackingViewModel : ViewModel() {
             callTimeout(20, TimeUnit.SECONDS)
             retryOnConnectionFailure(true)
             connectionPool(ConnectionPool(5, 30, TimeUnit.SECONDS))
-            cache(Cache(File.createTempFile("http_cache", ""), 10 * 1024 * 1024))
 
             addInterceptor { chain ->
                 val originalRequest = chain.request()
@@ -97,30 +117,23 @@ class TrackingViewModel : ViewModel() {
                     val response = chain.proceed(newRequest)
                     val duration = System.currentTimeMillis() - startTime
 
-                    Log.d(
-                        TAG,
-                        "🌐 Enhanced request: ${originalRequest.url} (${duration}ms) → ${response.code}"
-                    )
+                    Log.d(TAG, "🌐 Request: ${originalRequest.url} (${duration}ms) → ${response.code}")
 
-                    // ✅ CRITICAL: Validate response before returning
                     if (response.code == 502) {
-                        Log.e(TAG, "❌ 502 Bad Gateway - Problema del servidor detectado")
-                        // Retornar una respuesta con cuerpo de error en lugar de lanzar excepción
+                        Log.e(TAG, "❌ 502 Bad Gateway detected")
                         response.close()
                         return@addInterceptor Response.Builder()
                             .request(newRequest)
                             .protocol(response.protocol)
                             .code(502)
-                            .message("Servidor temporalmente no disponible (502)")
+                            .message("Servidor temporalmente no disponible")
                             .body("{\"error\":\"Servidor temporalmente no disponible\"}".toResponseBody("application/json".toMediaType()))
                             .build()
                     }
 
                     response
                 } catch (e: Exception) {
-                    val duration = System.currentTimeMillis() - startTime
-                    Log.e(TAG, "❌ Fallo en la petición para ${originalRequest.url} (${duration}ms): ${e.message}")
-                    // Retornar una respuesta sintética para errores de red
+                    Log.e(TAG, "❌ Request failed: ${e.message}")
                     Response.Builder()
                         .request(newRequest)
                         .protocol(okhttp3.Protocol.HTTP_1_1)
@@ -353,10 +366,7 @@ class TrackingViewModel : ViewModel() {
     // ============ WEBSOCKET MEJORADO PARA TIEMPO REAL ============
     @RequiresApi(Build.VERSION_CODES.O)
     fun startRealTimeTracking(loadInitialPosition: Boolean = true) {
-        if (isTrackingActive) {
-            Log.d(TAG, "⚠️ Real-time tracking already active")
-            return
-        }
+        Log.d(TAG, "🚀 Starting PERSISTENT real-time tracking")
 
         val deviceUniqueId = getDeviceUniqueId()
         if (deviceUniqueId == null || SecondFragment.JWT_TOKEN.isNullOrEmpty()) {
@@ -364,29 +374,389 @@ class TrackingViewModel : ViewModel() {
             return
         }
 
-        Log.d(TAG, "🚀 Starting enhanced real-time tracking for device: $deviceUniqueId")
-
-        kalmanFilter = VehicleKalmanFilter()
+        // ✅ CONFIGURAR COMO PERSISTENTE
+        isViewModelActive = true
+        keepWebSocketAlive = true
         isTrackingActive = true
 
-        // ✅ CARGAR POSICIÓN INICIAL PRIMERO
+        kalmanFilter = VehicleKalmanFilter()
+
+        Log.d(TAG, "🔌 Starting PERSISTENT WebSocket for device: $deviceUniqueId")
+
+        // ✅ CARGAR POSICIÓN INICIAL
         if (loadInitialPosition) {
             loadInitialVehiclePosition(deviceUniqueId)
         }
 
-        // ✅ LUEGO CONFIGURAR TIEMPO REAL
-        connectWebSocket()
+        // ✅ WEBSOCKET PERSISTENTE
+        connectWebSocketPersistent()
         startInterpolation()
 
-        // ✅ CARGAR POSICIÓN INICIAL ASYNC (no bloquear)
-        networkScope.launch {
-            delay(2000) // Dar tiempo al WebSocket
+        // ✅ FALLBACK: Cargar posición inicial async
+        webSocketScope.launch {
+            delay(3000)
             try {
-                fetchInitialPosition(deviceUniqueId)
+                if (_vehiclePosition.value == null) {
+                    fetchInitialPosition(deviceUniqueId)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "⚠️ Async initial position failed: ${e.message}")
             }
         }
+    }
+    // ✅ NUEVA FUNCIÓN: WebSocket Persistente con Reconexión Automática
+    private fun connectWebSocketPersistent(retryCount: Int = 0) {
+        if (!isViewModelActive || !keepWebSocketAlive) {
+            Log.d(TAG, "⏹️ WebSocket connection cancelled - ViewModel inactive")
+            return
+        }
+
+        reconnectJob?.cancel()
+
+        val timeSinceLastConnection = System.currentTimeMillis() - lastConnectionTime
+        if (timeSinceLastConnection < minReconnectDelay && retryCount > 0) {
+            Log.d(TAG, "⏳ Delaying reconnection to avoid spam")
+            scheduleReconnection(retryCount)
+            return
+        }
+
+        lastConnectionTime = System.currentTimeMillis()
+
+        // ✅ CERRAR CONEXIÓN ANTERIOR CORRECTAMENTE
+        try {
+            webSocket?.close(1000, "Reconectando")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing previous WebSocket: ${e.message}")
+        }
+        webSocket = null
+        isWebSocketConnected = false
+
+        _connectionStatus.value = if (retryCount == 0) ConnectionStatus.CONNECTING else ConnectionStatus.RECONNECTING
+
+        val wsUrl = "$WS_URL/ws?token=${SecondFragment.JWT_TOKEN}"
+        val request = Request.Builder()
+            .url(wsUrl)
+            .addHeader("User-Agent", "PeregrinoGPS-Persistent-WS/3.0")
+            .addHeader("Origin", "https://app.socialengeneering.work")
+            .build()
+
+        Log.d(TAG, "🔌 Connecting PERSISTENT WebSocket (attempt ${retryCount + 1})")
+
+        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.d(TAG, "✅ PERSISTENT WebSocket CONNECTED successfully")
+                isWebSocketConnected = true
+                reconnectAttempts = 0
+                _connectionStatus.value = ConnectionStatus.CONNECTED
+
+                val deviceUniqueId = getDeviceUniqueId()
+                if (deviceUniqueId != null) {
+                    val subscribeMessage = JSONObject().apply {
+                        put("type", "SUBSCRIBE")
+                        put("deviceId", deviceUniqueId)
+                        put("timestamp", System.currentTimeMillis())
+                        put("requestRealTime", true)
+                        put("persistent", true)
+                        put("backgroundMode", !isViewModelActive) // ✅ INDICAR SI ESTÁ EN BACKGROUND
+                    }
+
+                    try {
+                        val success = webSocket.send(subscribeMessage.toString())
+                        Log.d(TAG, "📡 PERSISTENT subscription sent: $success for device: $deviceUniqueId")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error sending subscription: ${e.message}")
+                    }
+
+                    // ✅ SOLICITAR POSICIÓN INMEDIATA
+                    webSocketScope.launch {
+                        delay(1000)
+                        try {
+                            val requestPosition = JSONObject().apply {
+                                put("type", "REQUEST_CURRENT_POSITION")
+                                put("deviceId", deviceUniqueId)
+                                put("persistent", true)
+                            }
+                            webSocket.send(requestPosition.toString())
+                            Log.d(TAG, "📍 PERSISTENT position request sent")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ Error requesting position: ${e.message}")
+                        }
+                    }
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                Log.d(TAG, "📨 PERSISTENT WebSocket message: ${text.take(150)}...")
+                try {
+                    handleWebSocketMessagePersistent(text)
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Error handling PERSISTENT message: ${e.message}")
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "❌ PERSISTENT WebSocket error: ${t.message}")
+                isWebSocketConnected = false
+                _connectionStatus.value = ConnectionStatus.ERROR
+
+                if (keepWebSocketAlive && isViewModelActive && reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++
+                    val delayMs = calculateReconnectDelay(reconnectAttempts)
+                    Log.d(TAG, "🔄 PERSISTENT WebSocket reconnecting in ${delayMs}ms (attempt $reconnectAttempts)")
+                    scheduleReconnection(reconnectAttempts, delayMs)
+                } else {
+                    Log.e(TAG, "❌ PERSISTENT WebSocket: Max reconnect attempts reached")
+                    _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "🔌 PERSISTENT WebSocket closed: $code - $reason")
+                isWebSocketConnected = false
+
+                if (code != 1000 && keepWebSocketAlive && isViewModelActive && reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++
+                    Log.d(TAG, "🔄 PERSISTENT WebSocket auto-reconnecting after unexpected close...")
+                    scheduleReconnection(reconnectAttempts)
+                } else {
+                    _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                }
+            }
+        })
+    }
+
+    // ✅ FUNCIÓN PARA PROGRAMAR RECONEXIÓN
+    private fun scheduleReconnection(attempt: Int, delayMs: Long = calculateReconnectDelay(attempt)) {
+        reconnectJob?.cancel()
+        reconnectJob = webSocketScope.launch {
+            delay(delayMs)
+            if (keepWebSocketAlive && isViewModelActive) {
+                Log.d(TAG, "🔄 Executing scheduled reconnection (attempt $attempt)")
+                connectWebSocketPersistent(attempt)
+            }
+        }
+    }
+
+    // ✅ CALCULAR DELAY DE RECONEXIÓN EXPONENCIAL
+    private fun calculateReconnectDelay(attempt: Int): Long {
+        val baseDelay = 1000L // 1 segundo
+        val maxDelay = 30000L // 30 segundos máximo
+        val exponentialDelay = baseDelay * (2.0.pow(attempt.coerceAtMost(5))).toLong()
+        return exponentialDelay.coerceAtMost(maxDelay)
+    }
+    // ✅ MANEJO MEJORADO DE MENSAJES WEBSOCKET
+    private fun handleWebSocketMessagePersistent(message: String) {
+        try {
+            val json = JSONObject(message)
+            val type = json.getString("type")
+
+            when (type) {
+                "POSITION_UPDATE" -> {
+                    val data = json.getJSONObject("data")
+                    val deviceId = data.getString("deviceId")
+
+                    val ourDeviceId = getDeviceUniqueId()
+                    if (deviceId == ourDeviceId) {
+                        val position = VehiclePosition(
+                            deviceId = deviceId,
+                            latitude = data.getDouble("latitude"),
+                            longitude = data.getDouble("longitude"),
+                            speed = data.optDouble("speed", 0.0),
+                            bearing = data.optDouble("course", 0.0),
+                            timestamp = System.currentTimeMillis(),
+                            accuracy = 8f,
+                            quality = "websocket_realtime"
+                        )
+
+                        Log.d(TAG, "🎯 PERSISTENT Real-time position: ${position.latitude}, ${position.longitude}")
+
+                        // ✅ ACTUALIZAR INMEDIATAMENTE EN MAIN THREAD
+                        processNewGPSPositionPersistent(position)
+                    }
+                }
+
+                "CONNECTION_CONFIRMED" -> {
+                    Log.d(TAG, "✅ PERSISTENT WebSocket subscription confirmed")
+                    _connectionStatus.value = ConnectionStatus.CONNECTED
+                }
+
+                "CURRENT_POSITION" -> {
+                    val data = json.getJSONObject("data")
+                    val position = VehiclePosition(
+                        deviceId = data.getString("deviceId"),
+                        latitude = data.getDouble("latitude"),
+                        longitude = data.getDouble("longitude"),
+                        speed = data.optDouble("speed", 0.0),
+                        bearing = data.optDouble("course", 0.0),
+                        timestamp = System.currentTimeMillis(),
+                        accuracy = 10f,
+                        quality = "current_requested"
+                    )
+
+                    Log.d(TAG, "📍 PERSISTENT Current position received: ${position.latitude}, ${position.longitude}")
+                    processNewGPSPositionPersistent(position)
+                }
+
+                "ERROR" -> {
+                    val errorMsg = json.optString("message", "Error desconocido")
+                    Log.e(TAG, "❌ PERSISTENT WebSocket server error: $errorMsg")
+                    postError("Error del servidor: $errorMsg")
+                }
+
+                "PING" -> {
+                    // ✅ RESPONDER A PINGS INMEDIATAMENTE
+                    val pongMessage = JSONObject().apply {
+                        put("type", "PONG")
+                        put("timestamp", System.currentTimeMillis())
+                    }
+                    webSocket?.send(pongMessage.toString())
+                    Log.d(TAG, "💓 PERSISTENT WebSocket ping responded")
+                }
+
+                "PONG" -> {
+                    Log.d(TAG, "💓 PERSISTENT WebSocket pong received")
+                }
+
+                else -> {
+                    Log.d(TAG, "ℹ️ PERSISTENT Unknown WebSocket message type: $type")
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error processing PERSISTENT WebSocket message: ${e.message}")
+        }
+    }
+
+    // ✅ PROCESAR POSICIÓN GPS CON PERSISTENCE
+    private fun processNewGPSPositionPersistent(rawPosition: VehiclePosition) {
+        try {
+            val filteredPosition = kalmanFilter?.update(rawPosition) ?: rawPosition
+
+            trackingHistory.add(filteredPosition)
+            if (trackingHistory.size > maxHistorySize) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                    trackingHistory.removeFirst()
+                }
+            }
+
+            lastGPSPosition = filteredPosition
+            lastUpdateTime = System.currentTimeMillis()
+
+            // ✅ ACTUALIZAR INMEDIATAMENTE EN MAIN THREAD
+            _vehiclePosition.value = filteredPosition
+
+            Log.d(TAG, "🎯 PERSISTENT Position processed: lat=${filteredPosition.latitude}, lon=${filteredPosition.longitude}, quality=${filteredPosition.quality}")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error processing PERSISTENT GPS position: ${e.message}")
+        }
+    }
+
+    // ✅ FUNCIÓN PARA MANTENER WEBSOCKET VIVO
+    fun keepWebSocketAlive() {
+        Log.d(TAG, "🔄 Keeping WebSocket alive...")
+        keepWebSocketAlive = true
+
+        if (!isWebSocketHealthy() && isViewModelActive) {
+            Log.d(TAG, "🔌 WebSocket not healthy, reconnecting...")
+            connectWebSocketPersistent()
+        } else if (isWebSocketHealthy()) {
+            // ✅ Enviar ping de mantenimiento
+            try {
+                val keepAliveMessage = JSONObject().apply {
+                    put("type", "KEEP_ALIVE")
+                    put("timestamp", System.currentTimeMillis())
+                }
+                webSocket?.send(keepAliveMessage.toString())
+                Log.d(TAG, "💓 Keep alive ping sent")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Keep alive ping failed: ${e.message}")
+                connectWebSocketPersistent()
+            }
+        }
+    }
+
+    // ✅ FUNCIÓN PARA PAUSAR WEBSOCKET (cuando app va a background)
+    fun pauseWebSocket() {
+        Log.d(TAG, "⏸️ Pausing WebSocket (app backgrounded)")
+        // NO cerrar WebSocket, solo marcar como pausado
+    }
+
+    // ✅ FUNCIÓN PARA REACTIVAR WEBSOCKET (cuando app vuelve a foreground)
+    // 2. REEMPLAZAR la función resumeWebSocket() con esta versión corregida:
+    fun resumeWebSocket() {
+        Log.d(TAG, "▶️ Resuming WebSocket (app foregrounded)")
+
+        if (!isWebSocketConnected && keepWebSocketAlive && isViewModelActive) {
+            Log.d(TAG, "🔌 WebSocket disconnected, reconnecting on resume...")
+            connectWebSocketPersistent()
+        }
+
+        // ✅ FIX: Usar constantes correctas de OkHttp WebSocket
+        webSocket?.let { ws ->
+            // ✅ CORREGIR: No usar ws.readyState, verificar conexión de otra forma
+            try {
+                val pingMessage = JSONObject().apply {
+                    put("type", "PING")
+                    put("timestamp", System.currentTimeMillis())
+                }
+
+                // ✅ CORREGIR: Intentar enviar ping, si falla reconectar
+                val success = ws.send(pingMessage.toString())
+                if (success) {
+                    Log.d(TAG, "💓 Resume ping sent successfully")
+                    isWebSocketConnected = true
+                    _connectionStatus.value = ConnectionStatus.CONNECTED
+                } else {
+                    Log.d(TAG, "❌ Resume ping failed, WebSocket may be closed")
+                    isWebSocketConnected = false
+                    connectWebSocketPersistent()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error sending resume ping: ${e.message}")
+                isWebSocketConnected = false
+                connectWebSocketPersistent()
+            }
+        } ?: run {
+            Log.d(TAG, "🔌 No WebSocket on resume, creating new connection...")
+            connectWebSocketPersistent()
+        }
+    }
+
+    // 3. CREAR FUNCIÓN AUXILIAR PARA VERIFICAR ESTADO DEL WEBSOCKET:
+    private fun isWebSocketHealthy(): Boolean {
+        return webSocket != null && isWebSocketConnected
+    }
+    // ✅ FUNCIÓN PARA FORZAR RECONEXIÓN
+    fun forceReconnectWebSocket() {
+        Log.d(TAG, "🔄 FORCE reconnecting WebSocket...")
+        reconnectAttempts = 0
+        connectWebSocketPersistent()
+    }
+
+    // ============ FUNCIÓN PARA DETENER TRACKING ============
+    fun stopRealTimeTracking() {
+        Log.d(TAG, "🛑 Stopping PERSISTENT real-time tracking")
+
+        isTrackingActive = false
+        keepWebSocketAlive = false
+        isWebSocketConnected = false
+
+        // ✅ CERRAR WEBSOCKET LIMPIAMENTE
+        webSocket?.close(1000, "Tracking stopped")
+        webSocket = null
+
+        // ✅ CANCELAR JOBS
+        reconnectJob?.cancel()
+        interpolationJob?.cancel()
+
+        kalmanFilter = null
+        lastGPSPosition = null
+        trackingHistory.clear()
+
+        _connectionStatus.value = ConnectionStatus.DISCONNECTED
+
+        Log.d(TAG, "✅ PERSISTENT real-time tracking stopped")
     }
 
 // 6. AGREGAR función de debug para verificar estado:
@@ -707,25 +1077,6 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
-    // ============ FUNCIÓN PARA DETENER TRACKING ============
-    fun stopRealTimeTracking() {
-        Log.d(TAG, "🛑 Stopping real-time tracking")
-
-        isTrackingActive = false
-        isWebSocketConnected = false
-
-        webSocket?.close(1000, "Tracking stopped")
-        webSocket = null
-
-        interpolationJob?.cancel()
-
-        kalmanFilter = null
-        lastGPSPosition = null
-        trackingHistory.clear()
-
-        Log.d(TAG, "✅ Real-time tracking stopped")
-    }
-
     // ============ FUNCIÓN PARA OBTENER HISTORIAL DE TRACKING ============
     fun getTrackingHistory(): List<VehiclePosition> {
         return trackingHistory.toList()
@@ -875,9 +1226,14 @@ class TrackingViewModel : ViewModel() {
         }
     }
 
+    // ✅ FUNCIONES AUXILIARES (mantener las existentes)
     private fun getDeviceUniqueId(): String? {
-        return context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-            .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
+        return try {
+            context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                .getString(SecondFragment.DEVICE_UNIQUE_ID_PREF, null)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     // ✅ ENHANCED: Device status check with better error handling
@@ -1929,16 +2285,23 @@ class TrackingViewModel : ViewModel() {
     }
 
     // ============ EXPLICACIÓN DETALLADA DE onCleared() ============
+    // ✅ CLEANUP MEJORADO
     override fun onCleared() {
-        super.onCleared() // ← PASO 1: Llamar al método padre
-        // ============ PASO 2: DETENER TRACKING EN TIEMPO REAL ============
+        super.onCleared()
+
+        Log.d(TAG, "🧹 TrackingViewModel onCleared - CLEANING UP")
+
+        // ✅ MARCAR COMO INACTIVO
+        isViewModelActive = false
+        keepWebSocketAlive = false
+
+        // ✅ DETENER TRACKING
         stopRealTimeTracking()
-        // ============ PASO 3: CANCELAR COROUTINES SCOPES ============
+
+        // ✅ CANCELAR SCOPES
         webSocketScope.cancel()
         interpolationScope.cancel()
-        networkScope.cancel()
-        cacheCleanupJob.cancel()
-        clearAllCaches()
-        Log.d(TAG, "🧹 TrackingViewModel cleanup completed - All resources freed")
+
+        Log.d(TAG, "✅ TrackingViewModel cleanup completed - All resources freed")
     }
 }

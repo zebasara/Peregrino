@@ -231,6 +231,12 @@
     <color name="holo_orange_light">#FF9800</color>
     <color name="holo_blue_light">#03A9F4</color>
 
+    <!-- ✅ NUEVOS COLORES PARA COMPARTIR UBICACIÓN -->
+    <color name="sharing_active">#F44336</color>
+    <color name="sharing_inactive">#2196F3</color>
+    <color name="sharing_success">#4CAF50</color>
+    <color name="sharing_warning">#FF9800</color>
+
 
 
 </resources>

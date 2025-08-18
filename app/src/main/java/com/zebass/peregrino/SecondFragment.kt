@@ -79,19 +79,36 @@ import java.util.concurrent.atomic.AtomicReference
 import android.animation.ValueAnimator
 import android.view.animation.AccelerateDecelerateInterpolator
 import com.google.android.gms.location.Priority
+import com.zebass.peregrino.R.string
+import com.zebass.peregrino.service.BackgroundSecurityService
+import com.zebass.peregrino.service.LocationSharingService
 import kotlinx.coroutines.flow.collect
 
 class SecondFragment : Fragment() {
 
+
     // ============ BINDING Y PROPIEDADES CORE ============
     private var _binding: FragmentSecondBinding? = null
-    private val binding get() = _binding ?: run {
-        Log.w(TAG, "Binding accessed when null - fragment may be destroyed")
-        throw IllegalStateException("Fragment binding is null - fragment destroyed")
-    }
+    private val binding
+        get() = _binding ?: run {
+            Log.w(TAG, "Binding accessed when null - fragment may be destroyed")
+            throw IllegalStateException("Fragment binding is null - fragment destroyed")
+        }
     private lateinit var sharedPreferences: SharedPreferences
     private val args: SecondFragmentArgs by navArgs()
     private val viewModel: TrackingViewModel by viewModels()
+
+    private var isSecurityModeActive = false
+    private var securityReceiver: BroadcastReceiver? = null
+
+    private var webSocketReceiver: BroadcastReceiver? = null
+    // ============ NUEVAS VARIABLES PARA TRACKING PERSISTENTE ============
+    private var isFragmentVisible = false
+    private var isFragmentResumed = false
+    // ============ NUEVAS VARIABLES PARA COMPARTIR UBICACIÓN ============
+    private var isCurrentlySharingLocation = false
+    private var currentShareId: String? = null
+    private var sharingStartTime: Long = 0
 
     // ============ MAPA Y OVERLAYS ============
     private var map: MapView? = null
@@ -237,7 +254,8 @@ class SecondFragment : Fragment() {
         }
 
         _binding = FragmentSecondBinding.inflate(inflater, container, false)
-        sharedPreferences = requireActivity().getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        sharedPreferences =
+            requireActivity().getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
         viewModel.setContext(requireContext())
         return binding.root
     }
@@ -245,6 +263,8 @@ class SecondFragment : Fragment() {
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // ✅ MARCAR FRAGMENTO COMO VISIBLE
+        isFragmentVisible = true
 
         // Inicializar servicios
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(requireActivity())
@@ -254,7 +274,7 @@ class SecondFragment : Fragment() {
         JWT_TOKEN = args.jwtToken
         Log.d(TAG, "🚀 onViewCreated: userEmail=$userEmail, hasToken=${!JWT_TOKEN.isNullOrEmpty()}")
 
-        binding.textUser.text = "Bienvenido: $userEmail"
+        binding.textUser.text = "$userEmail"
 
         // Inicialización secuencial
         lifecycleScope.launch {
@@ -268,9 +288,11 @@ class SecondFragment : Fragment() {
 
                 delay(200)
                 if (hasAssociatedDevice()) {
-                    Log.d(TAG, "✅ Device found, starting enhanced services...")
+                    Log.d(TAG, "✅ Device found, starting PERSISTENT tracking...")
+
+                    // ✅ FORZAR REFRESH Y INICIAR TRACKING PERSISTENTE
                     viewModel.forceDataRefresh()
-                    startEnhancedServices()
+                    startPersistentTrackingServices()
                 } else {
                     Log.d(TAG, "⚠️ No device associated")
                     updateStatusUI("⚠️ Asocia un dispositivo para comenzar", android.R.color.holo_orange_dark)
@@ -286,7 +308,214 @@ class SecondFragment : Fragment() {
         requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner) {
             logout()
         }
+        restoreSharingState()
+        restoreSecurityState()
+        registerSecurityReceiver()
     }
+    // ✅ NUEVA FUNCIÓN: OBSERVADORES PERSISTENTES
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun observeViewModelPersistent() {
+        Log.d(TAG, "🔍 Setting up PERSISTENT observers...")
+
+        // ✅ OBSERVAR POSICIÓN DEL VEHÍCULO - ACTUALIZACIÓN INMEDIATA
+        lifecycleScope.launch {
+            viewModel.vehiclePosition.collectLatest { position ->
+                if (!isFragmentVisible) {
+                    Log.d(TAG, "📍 Position update received but fragment not visible, caching...")
+                    return@collectLatest
+                }
+
+                if (position != null) {
+                    Log.d(TAG, "🎯 LIVE POSITION UPDATE: lat=${position.latitude}, lon=${position.longitude}, quality=${position.quality}")
+
+                    // ✅ ACTUALIZAR INMEDIATAMENTE SIN THROTTLE
+                    updateVehiclePositionEnhanced(position)
+
+                    // ✅ MOSTRAR NOTIFICACIÓN VISUAL DE ACTUALIZACIÓN
+                    if (!position.isInterpolated && position.quality == "websocket_realtime") {
+                        showPositionUpdateIndicator()
+                    }
+                } else {
+                    Log.d(TAG, "📍 Position is null, may need to load initial position")
+
+                    // ✅ Si no hay posición después de 5 segundos, intentar cargar
+                    handler.postDelayed({
+                        if (vehicleMarker.get() == null && isFragmentVisible) {
+                            Log.w(TAG, "⚠️ No vehicle position after timeout, forcing load...")
+                            forceLoadInitialPosition()
+                        }
+                    }, 5000)
+                }
+            }
+        }
+
+        // ✅ OBSERVAR ESTADO DE CONEXIÓN WEBSOCKET
+        lifecycleScope.launch {
+            viewModel.connectionStatus.collectLatest { status ->
+                updateConnectionStatusUI(status)
+            }
+        }
+
+        // ✅ RESTO DE OBSERVADORES (sin cambios)
+        lifecycleScope.launch {
+            viewModel.safeZone.collectLatest { zone ->
+                if (zone != null) {
+                    val geoPoint = GeoPoint(zone.latitude, zone.longitude)
+                    safeZone = geoPoint
+                    safeZoneCache.set(geoPoint)
+                    updateSafeZoneUI(geoPoint)
+                } else {
+                    clearSafeZoneUI()
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            viewModel.error.collectLatest { error ->
+                error?.let {
+                    handleViewModelError(it)
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            viewModel.deviceInfo.collectLatest { info ->
+                info?.let {
+                    deviceInfoCache.set(info)
+                    updateDeviceInfoUI(info)
+                }
+            }
+        }
+    }
+
+    // ✅ NUEVA FUNCIÓN: INDICADOR VISUAL DE ACTUALIZACIÓN
+    private fun showPositionUpdateIndicator() {
+        try {
+            // ✅ Cambiar temporalmente el color del status para mostrar actividad
+            binding.textConnectionStatus?.let { statusText ->
+                val originalColor = statusText.currentTextColor
+                statusText.setTextColor(ContextCompat.getColor(requireContext(), android.R.color.holo_green_light))
+                statusText.text = "📡 Actualizado en tiempo real"
+
+                // ✅ Restaurar color original después de 1 segundo
+                handler.postDelayed({
+                    if (_binding != null) {
+                        statusText.setTextColor(originalColor)
+                        statusText.text = "✅ En Tiempo Real"
+                    }
+                }, 1000)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing position update indicator: ${e.message}")
+        }
+    }
+
+    // ✅ NUEVA FUNCIÓN: ACTUALIZAR ESTADO DE CONEXIÓN WEBSOCKET
+    private fun updateConnectionStatusUI(status: TrackingViewModel.ConnectionStatus) {
+        if (!isFragmentValid()) return
+
+        try {
+            val (text, color) = when (status) {
+                TrackingViewModel.ConnectionStatus.CONNECTED ->
+                    "✅ En Tiempo Real" to android.R.color.holo_green_light
+                TrackingViewModel.ConnectionStatus.CONNECTING ->
+                    "🔄 Conectando..." to android.R.color.holo_orange_light
+                TrackingViewModel.ConnectionStatus.RECONNECTING ->
+                    "🔄 Reconectando..." to android.R.color.holo_orange_dark
+                TrackingViewModel.ConnectionStatus.ERROR ->
+                    "❌ Error Conexión" to android.R.color.holo_red_light
+                TrackingViewModel.ConnectionStatus.DISCONNECTED ->
+                    "🔴 Desconectado" to android.R.color.holo_red_dark
+            }
+
+            binding.textConnectionStatus?.apply {
+                this.text = text
+                setTextColor(ContextCompat.getColor(requireContext(), color))
+                visibility = View.VISIBLE
+            }
+
+            Log.d(TAG, "📊 Connection status updated: $text")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error updating connection status UI: ${e.message}")
+        }
+    }
+
+    // ✅ NUEVA FUNCIÓN: INICIAR SERVICIOS DE TRACKING PERSISTENTE
+    @RequiresApi(Build.VERSION_CODES.O)
+    private suspend fun startPersistentTrackingServices() = withContext(Dispatchers.IO) {
+        Log.d(TAG, "🚀 Starting PERSISTENT tracking services...")
+
+        try {
+            // ✅ PASO 1: Iniciar servicio de tracking
+            launch {
+                Log.d(TAG, "📱 Starting tracking service...")
+                startTrackingService()
+            }
+
+            delay(1000)
+
+            // ✅ PASO 2: Iniciar tracking en tiempo real PERSISTENTE
+            launch {
+                Log.d(TAG, "🎯 Starting PERSISTENT real-time tracking...")
+                viewModel.startRealTimeTracking(loadInitialPosition = true)
+            }
+
+            delay(1500)
+
+            // ✅ PASO 3: Cargar posición inicial si es necesario
+            launch {
+                Log.d(TAG, "📍 Loading initial position...")
+                getDeviceUniqueId()?.let { uniqueId ->
+                    try {
+                        val position = viewModel.getLastPosition(uniqueId, allowOldPositions = true, maxAgeMinutes = 1440)
+                        val geoPoint = GeoPoint(position.latitude, position.longitude)
+
+                        withContext(Dispatchers.Main) {
+                            updateVehiclePositionEnhanced(
+                                TrackingViewModel.VehiclePosition(
+                                    deviceId = uniqueId,
+                                    latitude = position.latitude,
+                                    longitude = position.longitude,
+                                    speed = position.speed,
+                                    bearing = position.course,
+                                    timestamp = System.currentTimeMillis(),
+                                    accuracy = 15f,
+                                    quality = "initial_load"
+                                )
+                            )
+                            showSnackbar("📍 Vehículo cargado en el mapa", Snackbar.LENGTH_SHORT)
+                        }
+
+                        Log.d(TAG, "✅ Initial position loaded and displayed")
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error loading initial position: ${e.message}")
+                        withContext(Dispatchers.Main) {
+                            showSnackbar("⚠️ Error cargando posición inicial", Snackbar.LENGTH_LONG)
+                        }
+                    }
+                }
+            }
+
+            delay(2000)
+
+            // ✅ PASO 4: Configurar tareas periódicas
+            launch {
+                Log.d(TAG, "⏰ Starting periodic tasks...")
+                schedulePeriodicSync()
+                startPeriodicStatusCheck()
+            }
+
+            Log.d(TAG, "✅ All PERSISTENT tracking services started successfully")
+
+        } catch (error: Exception) {
+            Log.e(TAG, "❌ Error starting PERSISTENT services: ${error.message}")
+            withContext(Dispatchers.Main) {
+                showSnackbar("❌ Error iniciando servicios: ${error.message}", Snackbar.LENGTH_LONG)
+            }
+        }
+    }
+
     // ============ CONFIGURACIÓN MEJORADA DEL MAPA ============
     private suspend fun setupEnhancedMap() = withContext(Dispatchers.Main) {
         map = binding.mapView.apply {
@@ -346,35 +575,54 @@ class SecondFragment : Fragment() {
             false
         }
     }
+
     private fun pauseAutoFollowing() {
         if (isFollowingVehicle.get()) {
             isFollowingVehicle.set(false)
             updateFollowButtonText()
             Log.d(TAG, "⏸️ Auto-following paused due to user interaction")
 
-            showSnackbar("⏸️ Seguimiento pausado - Toca 'Siguiendo' para reactivar", Snackbar.LENGTH_SHORT)
+            showSnackbar(
+                "⏸️ Seguimiento pausado - Toca 'Siguiendo' para reactivar",
+                Snackbar.LENGTH_SHORT
+            )
         }
     }
 
     // ============ OBSERVADORES MEJORADOS ============
     @RequiresApi(Build.VERSION_CODES.O)
     private fun observeViewModel() {
-        // Observar posición del vehículo con manejo mejorado
+        // ✅ OBSERVAR POSICIÓN DEL VEHÍCULO CON ACTUALIZACIÓN INMEDIATA
         lifecycleScope.launch {
             viewModel.vehiclePosition.collectLatest { position ->
                 if (position != null) {
-                    updateVehiclePositionEnhanced(position)
+                    Log.d(
+                        TAG,
+                        "🎯 NEW POSITION RECEIVED: lat=${position.latitude}, lon=${position.longitude}, quality=${position.quality}"
+                    )
+
+                    // ✅ ACTUALIZAR INMEDIATAMENTE SIN THROTTLE PARA DATOS REALES
+                    if (!position.isInterpolated) {
+                        updateVehiclePositionEnhanced(position)
+                    } else {
+                        // Solo throttle para interpolación
+                        val currentTime = System.currentTimeMillis()
+                        if (currentTime - lastMapUpdate > 100L) { // 100ms para interpolación
+                            updateVehiclePositionEnhanced(position)
+                        }
+                    }
                 } else {
-                    // ✅ Si no hay posición después de 10 segundos, forzar carga
+                    // ✅ Si no hay posición después de 5 segundos, forzar carga
                     handler.postDelayed({
                         if (vehicleMarker.get() == null) {
                             Log.w(TAG, "⚠️ No vehicle position after timeout, forcing load...")
                             forceLoadInitialPosition()
                         }
-                    }, 10000)
+                    }, 5000) // Reducido a 5 segundos
                 }
             }
         }
+
         // Observar zona segura
         lifecycleScope.launch {
             viewModel.safeZone.collectLatest { zone ->
@@ -409,54 +657,98 @@ class SecondFragment : Fragment() {
         }
     }
 
-
     // ============ ACTUALIZACIÓN MEJORADA DE POSICIÓN DEL VEHÍCULO ============
     private fun updateVehiclePositionEnhanced(position: TrackingViewModel.VehiclePosition) {
-        if (!isMapReady.get()) return
+        if (!isMapReady.get()) {
+            Log.w(TAG, "⚠️ Map not ready, skipping position update")
+            return
+        }
 
         val currentTime = System.currentTimeMillis()
 
-        // ✅ THROTTLE MÁS INTELIGENTE
-        val shouldUpdate = when {
-            position.isInterpolated -> currentTime - lastMapUpdate > 33L // 30 FPS para interpolación
-            else -> currentTime - lastMapUpdate > 16L // 60 FPS para datos reales
+        // ✅ ACTUALIZAR TIMESTAMP INMEDIATAMENTE PARA DATOS REALES
+        if (!position.isInterpolated) {
+            lastMapUpdate = currentTime
+            Log.d(TAG, "✅ REAL DATA: Updating position immediately")
+        } else {
+            // ✅ THROTTLE SOLO PARA INTERPOLACIÓN
+            if (currentTime - lastMapUpdate < 50L) {
+                return
+            }
+            lastMapUpdate = currentTime
+            Log.d(TAG, "🔄 INTERPOLATED: Updating with throttle")
         }
 
-        if (!shouldUpdate) return
-
-        lastMapUpdate = currentTime
         val newPoint = GeoPoint(position.latitude, position.longitude)
 
-        // ✅ ACTUALIZAR MARCADOR SOLO SI HAY CAMBIO SIGNIFICATIVO
-        val lastMarkerPos = vehicleMarker.get()?.position
-        val needsMarkerUpdate = lastMarkerPos == null ||
-                lastMarkerPos.distanceToAsDouble(newPoint) > 1.0 || // 1 metro
-                !position.isInterpolated // Siempre actualizar datos reales
-
-        if (needsMarkerUpdate) {
+        // ✅ AQUÍ - cuando detectes posición inválida
+        if (!isValidPosition(newPoint)) {
+            Log.w(TAG, "⚠️ Invalid position detected, clearing old GPS data")
+            clearOldGPSData() // ← LLAMAR AQUÍ
+            return
+        }
+        // ✅ VALIDAR COORDENADAS ANTES DE ACTUALIZAR
+        if (isValidPosition(newPoint)) {
             val newState = determineVehicleState(newPoint)
             updateVehicleMarkerSmooth(newPoint, position.bearing, position.speed, newState)
 
-            // ✅ NO LLAMAR updateVehicleTrack - SIN LÍNEAS AZULES
-            // updateVehicleTrack(newPoint) // ← ELIMINADO
-        }
+            // ✅ SEGUIMIENTO AUTOMÁTICO
+            if (isFollowingVehicle.get()) {
+                smoothMoveMapToPosition(newPoint, position.bearing)
+            }
 
-        // ✅ SEGUIMIENTO AUTOMÁTICO SOLO CON ROTACIÓN
-        if (isFollowingVehicle.get() && needsMarkerUpdate) {
-            smoothMoveMapToPosition(newPoint, position.bearing)
-        }
+            // ✅ VERIFICAR ZONA SEGURA SOLO CON DATOS REALES
+            if (!position.isInterpolated) {
+                checkSafeZone(newPoint, position.deviceId.hashCode())
+            }
 
-        // ✅ VERIFICAR ZONA SEGURA SOLO CON DATOS REALES
-        if (!position.isInterpolated) {
-            checkSafeZone(newPoint, position.deviceId.hashCode())
-        }
+            updatePositionInfo(position)
 
-        updatePositionInfo(position)
+            // ✅ ACTUALIZAR CACHE DE ÚLTIMA POSICIÓN
+            lastPositionCache.set(newPoint)
+
+            Log.d(TAG, "✅ Position updated successfully: ${position.quality}")
+
+        } else {
+            Log.w(
+                TAG,
+                "⚠️ Invalid position received: lat=${position.latitude}, lon=${position.longitude}"
+            )
+        }
     }
 
+    // ✅ NUEVA FUNCIÓN: VALIDAR POSICIÓN
+    private fun isValidPosition(position: GeoPoint): Boolean {
+        return position.latitude != 0.0 &&
+                position.longitude != 0.0 &&
+                position.latitude >= -90.0 &&
+                position.latitude <= 90.0 &&
+                position.longitude >= -180.0 &&
+                position.longitude <= 180.0 &&
+                // ✅ EVITAR POSICIONES HARDCODEADAS O MUY LEJANAS
+                !(position.latitude == TANDIL_LAT && position.longitude == TANDIL_LON) &&
+                // ✅ VALIDAR QUE LA POSICIÓN ESTÉ EN UN RANGO RAZONABLE
+                isPositionReasonable(position)
+    }
+
+    private fun isPositionReasonable(position: GeoPoint): Boolean {
+        // Si tienes una última posición conocida válida, verificar que no esté muy lejos
+        val lastKnown = lastPositionCache.get()
+        if (lastKnown != null) {
+            val distance = position.distanceToAsDouble(lastKnown)
+            // Si la nueva posición está a más de 100km de la anterior, es sospechosa
+            return distance < 25000 // 25km en metros
+        }
+        return true
+    }
 
     // ============ ACTUALIZACIÓN SUAVE DEL MARCADOR ============
-    private fun updateVehicleMarkerSmooth(position: GeoPoint, bearing: Double, speed: Double, state: VehicleState) {
+    private fun updateVehicleMarkerSmooth(
+        position: GeoPoint,
+        bearing: Double,
+        speed: Double,
+        state: VehicleState
+    ) {
         try {
             var marker = vehicleMarker.get()
 
@@ -483,7 +775,12 @@ class SecondFragment : Fragment() {
     }
 
 
-    private fun createEnhancedVehicleMarker(position: GeoPoint, bearing: Double, speed: Double, state: VehicleState): Marker {
+    private fun createEnhancedVehicleMarker(
+        position: GeoPoint,
+        bearing: Double,
+        speed: Double,
+        state: VehicleState
+    ): Marker {
         return Marker(map).apply {
             this.position = position
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
@@ -496,7 +793,13 @@ class SecondFragment : Fragment() {
         }
     }
 
-    private fun animateVehicleMarker(marker: Marker, newPosition: GeoPoint, bearing: Double, speed: Double, state: VehicleState) {
+    private fun animateVehicleMarker(
+        marker: Marker,
+        newPosition: GeoPoint,
+        bearing: Double,
+        speed: Double,
+        state: VehicleState
+    ) {
         val oldPosition = marker.position
 
         // Cancelar animación anterior
@@ -530,7 +833,11 @@ class SecondFragment : Fragment() {
 
 
     // ============ CREACIÓN DE ÍCONO DINÁMICO MEJORADO ============
-    private fun createDynamicVehicleIcon(bearing: Double, speed: Double, state: VehicleState): android.graphics.drawable.Drawable {
+    private fun createDynamicVehicleIcon(
+        bearing: Double,
+        speed: Double,
+        state: VehicleState
+    ): android.graphics.drawable.Drawable {
         val size = 56 // Tamaño aumentado
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
@@ -633,6 +940,7 @@ class SecondFragment : Fragment() {
 
         Log.d(TAG, "🧭 Map rotating to bearing: ${String.format("%.1f", newBearing)}°")
     }
+
     // ============ ACTUALIZACIÓN DEL RASTRO DEL VEHÍCULO ============
     private fun updateVehicleTrack(newPoint: GeoPoint) {
     }
@@ -652,68 +960,693 @@ class SecondFragment : Fragment() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun setupEnhancedButtons() {
         with(binding) {
-            // Botón mejorado de seguimiento
-            // ✅ BOTÓN PRINCIPAL DE SEGUIMIENTO
-            buttonMyLocation.setOnClickListener {
-                toggleVehicleFollowing() // Siempre alternar seguimiento del vehículo
-            }
-            // ✅ LONG PRESS para ir a MI ubicación GPS
-            buttonMyLocation.setOnLongClickListener {
-                centerOnMyLocation()
-                true
-            }
+            // ✅ BOTÓN PRINCIPAL DE SEGUIMIENTO (existente)
+            buttonMyLocation.apply {
+                setOnClickListener {
+                    toggleVehicleFollowing()
+                }
 
-
-
-            // Botones de zona segura
-            buttonZonaSegura.setOnClickListener { handleSafeZoneButton() }
-            buttonZonaSeguraMain.setOnClickListener { handleSafeZoneButton() }
-
-            // Botón de asociar dispositivo
-            buttonAssociateDevice.setOnClickListener { showAssociateDeviceDialog() }
-
-            // Botón de estado mejorado
-            buttonDeviceStatus.setOnClickListener { checkDeviceStatus() }
-            buttonDeviceStatus.setOnLongClickListener {
-                clearOldPositionsDialog()
-                true
-            }
-            // ✅ NUEVO: Doble tap para recargar todo
-            buttonDeviceStatus.setOnLongClickListener {
-                Log.d(TAG, "🔄 Force refresh triggered by user")
-                lifecycleScope.launch {
-                    try {
-                        viewModel.forceDataRefresh()
-                        delay(1000)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            forceLoadInitialPosition()
+                setOnLongClickListener {
+                    val opciones = arrayOf(
+                        "📍 Ir a mi ubicación",
+                        "🧹 Limpiar Cache",
+                        "🔄 Reconectar WebSocket",
+                        "🛡️ Modo Seguridad" // ✅ NUEVA OPCIÓN
+                    )
+                    MaterialAlertDialogBuilder(requireContext())
+                        .setTitle("Acciones rápidas")
+                        .setItems(opciones) { _, which ->
+                            when (which) {
+                                0 -> centerOnMyLocation()
+                                1 -> clearOldGPSData()
+                                2 -> forceReconnectWebSocket()
+                                3 -> toggleSecurityMode() // ✅ NUEVA FUNCIÓN
+                            }
                         }
-                        showSnackbar("🔄 Datos actualizados", Snackbar.LENGTH_SHORT)
-                    } catch (e: Exception) {
-                        showSnackbar("❌ Error actualizando: ${e.message}", Snackbar.LENGTH_LONG)
-                    }
+                        .show()
+                    true
+                }
+            }
+            // ✅ BOTÓN DE ZONA SEGURA MEJORADO
+            buttonZonaSegura.setOnLongClickListener {
+                if (isSecurityModeActive) {
+                    MaterialAlertDialogBuilder(requireContext())
+                        .setTitle("🛡️ Opciones de Seguridad")
+                        .setItems(arrayOf(
+                            "🔇 Modo Silencioso",
+                            "📊 Estado de Seguridad",
+                            "🛑 Desactivar Seguridad"
+                        )) { _, which ->
+                            when (which) {
+                                0 -> enableSilentSecurityMode()
+                                1 -> showSecurityStatus()
+                                2 -> stopSecurityMode()
+                            }
+                        }
+                        .show()
+                } else {
+                    handleSafeZoneButton()
                 }
                 true
             }
 
-            // Configuración GPS
-            buttonShowConfig.setOnClickListener { showTraccarClientConfig() }
-            buttonShowConfig.setOnLongClickListener {
-                showPositionTroubleshootingDialog()
-                true
+            // ✅ RESTO DE BOTONES (mantener configuración existente)
+            buttonZonaSeguraMain.setOnClickListener { handleSafeZoneButton() }
+            buttonAssociateDevice.setOnClickListener { showAssociateDeviceDialog() }
+
+            buttonDeviceStatus.apply {
+                setOnClickListener {
+                    checkDeviceStatus()
+                }
+
+                setOnLongClickListener {
+                    val opciones = arrayOf(
+                        "🧹 Limpiar Cache GPS",
+                        "🗑️ Borrar posiciones antiguas",
+                        "🔄 Reconectar WebSocket"
+                    )
+                    MaterialAlertDialogBuilder(requireContext())
+                        .setTitle("Acciones de Estado")
+                        .setItems(opciones) { _, which ->
+                            when (which) {
+                                0 -> clearOldGPSData()
+                                1 -> clearOldPositionsDialog()
+                                2 -> forceReconnectWebSocket() // ✅ NUEVA OPCIÓN
+                            }
+                        }
+                        .show()
+                    true
+                }
             }
 
-            // Botón de test WebSocket
+            buttonShowUbicacion.setOnClickListener { showShareLocationDialog() }
             buttonTestWS.setOnClickListener { toggleAutoFollow() }
 
-            // Ocultar elementos no necesarios
+            // ✅ OCULTAR ELEMENTOS NO NECESARIOS
             buttonDescargarOffline.visibility = View.GONE
             progressBarDownload.visibility = View.GONE
 
             updateFollowButtonText()
         }
     }
+    private fun showSecurityStatus() {
+        // ✅ ESTA FUNCIÓN SE PODRÍA EXPANDIR PARA MOSTRAR ESTADÍSTICAS DETALLADAS
+        val message = if (isSecurityModeActive) {
+            "🛡️ Modo Seguridad: ACTIVO\n" +
+                    "📡 Monitoreo: 24/7 en segundo plano\n" +
+                    "🎯 Zona Segura: Configurada\n" +
+                    "⚡ Estado: Funcionando correctamente"
+        } else {
+            "🛡️ Modo Seguridad: INACTIVO\n" +
+                    "ℹ️ No hay monitoreo activo"
+        }
 
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("📊 Estado de Seguridad")
+            .setMessage(message)
+            .setPositiveButton("✅ OK", null)
+            .show()
+    }
+
+    // ============ NUEVA FUNCIONALIDAD: COMPARTIR UBICACIÓN ============
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun showShareLocationDialog() {
+        Log.d(TAG, "🌍 Share dialog requested")
+
+        // Verificar estado
+        if (isCurrentlySharingLocation) {
+            showStopSharingDialog()
+            return
+        }
+
+        // ✅ USAR AlertDialog ESTÁNDAR
+        val options = arrayOf(
+            "📍 Compartir por 10 minutos",
+            "📍 Compartir por 1 hora",
+            "📍 Compartir por 8 horas",
+            "📍 Compartir indefinidamente"
+        )
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("🌍 Compartir Ubicación")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> startLocationSharing(10)
+                    1 -> startLocationSharing(60)
+                    2 -> startLocationSharing(480)
+                    3 -> startLocationSharing(-1)
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+    private fun showStopSharingDialog() {
+        val elapsed = System.currentTimeMillis() - sharingStartTime
+        val elapsedText = formatElapsedTime(elapsed)
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("🛑 Detener Compartir Ubicación")
+            .setMessage("Ubicación compartida por: $elapsedText\n\n¿Quieres detener el compartir ubicación?")
+            .setPositiveButton("🛑 Sí, Detener") { _, _ ->
+                stopLocationSharing()
+            }
+            .setNegativeButton("↩️ Continuar Compartiendo", null)
+            .show()
+    }
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun startLocationSharing(durationMinutes: Int) {
+        if (!hasLocationPermission()) {
+            showSnackbar("⚠️ Se necesitan permisos de ubicación para compartir", Snackbar.LENGTH_LONG)
+            return
+        }
+
+        val deviceUniqueId = getDeviceUniqueId()
+        if (deviceUniqueId == null) {
+            showSnackbar("❌ No hay dispositivo asociado", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        if (JWT_TOKEN.isNullOrEmpty()) {
+            showSnackbar("❌ Token de autenticación no válido", Snackbar.LENGTH_SHORT)
+            handleUnauthorizedError()
+            return
+        }
+
+        showSnackbar("🔄 Iniciando compartir ubicación...", Snackbar.LENGTH_SHORT)
+
+        lifecycleScope.launch {
+            try {
+                val recipientInfo = JSONObject().apply {
+                    put("startedFrom", "android_app")
+                    put("deviceModel", Build.MODEL)
+                    put("appVersion", "3.0")
+                }
+
+                val requestData = JSONObject().apply {
+                    put("deviceId", deviceUniqueId)
+                    put("durationMinutes", durationMinutes)
+                    put("recipientInfo", recipientInfo)
+                }
+
+                val apiUrl = "https://app.socialengeneering.work/api/share/start-location-sharing"
+
+                val response = makeApiRequest(
+                    apiUrl,
+                    "POST",
+                    requestData.toString()
+                )
+
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    val json = JSONObject(responseBody ?: "{}")
+
+                    val shareId = json.getString("shareId")
+                    val shareUrl = json.getString("shareUrl")
+                    val whatsappMessage = json.getString("whatsappMessage")
+                    val durationText = json.getString("duration")
+
+                    // ✅ CRÍTICO: Guardar estado ANTES de mostrar diálogo
+                    currentShareId = shareId
+                    isCurrentlySharingLocation = true
+                    sharingStartTime = System.currentTimeMillis()
+
+                    // ✅ CRÍTICO: Mostrar diálogo EN EL HILO PRINCIPAL
+                    withContext(Dispatchers.Main) {
+                        // Iniciar servicio
+                        startLocationSharingService(shareId, durationMinutes, deviceUniqueId)
+
+                        // Actualizar UI
+                        updateSharingButton(true, durationText)
+
+                        // ✅ MOSTRAR DIÁLOGO INMEDIATAMENTE
+                        showSharingSuccessDialog(shareUrl, whatsappMessage, durationText)
+                    }
+
+                    // Guardar en SharedPreferences
+                    sharedPreferences.edit {
+                        putString("current_share_id", shareId)
+                        putBoolean("is_sharing_location", true)
+                        putLong("sharing_start_time", sharingStartTime)
+                        putInt("sharing_duration_minutes", durationMinutes)
+                    }
+
+                    Log.d(TAG, "✅ Location sharing started successfully: $shareId")
+
+                } else {
+                    val errorMsg = response.body?.string() ?: "Error desconocido"
+                    Log.e(TAG, "❌ Error response: $errorMsg")
+
+                    withContext(Dispatchers.Main) {
+                        showSnackbar("❌ Error iniciando compartir: $errorMsg", Snackbar.LENGTH_LONG)
+                    }
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error starting location sharing", e)
+
+                withContext(Dispatchers.Main) {
+                    showSnackbar("❌ Error: ${e.message}", Snackbar.LENGTH_LONG)
+                }
+            }
+        }
+    }
+
+    private fun startLocationSharingService(shareId: String, durationMinutes: Int, deviceId: String) {
+        val intent = Intent(requireContext(), LocationSharingService::class.java).apply {
+            action = LocationSharingService.ACTION_START_SHARING
+            putExtra(LocationSharingService.EXTRA_SHARE_ID, shareId)
+            putExtra(LocationSharingService.EXTRA_DURATION_MINUTES, durationMinutes)
+            putExtra(LocationSharingService.EXTRA_DEVICE_ID, deviceId)
+            putExtra(LocationSharingService.EXTRA_JWT_TOKEN, JWT_TOKEN)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            requireContext().startForegroundService(intent)
+        } else {
+            requireContext().startService(intent)
+        }
+
+        Log.d(TAG, "🚀 LocationSharingService started: shareId=$shareId")
+    }
+    private fun showSharingSuccessDialog(shareUrl: String, whatsappMessage: String, duration: String) {
+        debugSharingFlow()
+        try {
+            Log.d(TAG, "📱 Showing sharing success dialog...")
+            Log.d(TAG, "📱 ShareUrl: $shareUrl")
+            Log.d(TAG, "📱 WhatsApp message length: ${whatsappMessage.length}")
+
+            // ✅ VERIFICAR QUE ESTAMOS EN EL HILO PRINCIPAL
+            if (!isFragmentValid()) {
+                Log.e(TAG, "❌ Fragment not valid for showing dialog")
+                return
+            }
+
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle("✅ Ubicación Compartida")
+                .setMessage("🌍 Tu ubicación se está compartiendo por $duration\n\n🔗 Enlace: $shareUrl")
+                .setPositiveButton("📱 Compartir por WhatsApp") { _, _ ->
+                    Log.d(TAG, "📱 WhatsApp button clicked")
+                    shareViaWhatsApp(whatsappMessage)
+                }
+                .setNeutralButton("📋 Copiar Enlace") { _, _ ->
+                    Log.d(TAG, "📋 Copy link button clicked")
+                    copyToClipboard("Enlace de Ubicación", shareUrl)
+                    showSnackbar("📋 Enlace copiado al portapapeles", Snackbar.LENGTH_SHORT)
+                }
+                .setNegativeButton("✅ OK") { _, _ ->
+                    Log.d(TAG, "✅ OK button clicked")
+                }
+                .setCancelable(true)
+                .show()
+
+            Log.d(TAG, "✅ Dialog shown successfully")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error showing success dialog: ${e.message}")
+
+            // ✅ FALLBACK: Mostrar opciones directamente
+            showFallbackSharingOptions(shareUrl, whatsappMessage)
+        }
+    }
+    private fun showFallbackSharingOptions(shareUrl: String, whatsappMessage: String) {
+        try {
+            // Opciones simples con AlertDialog básico
+            val options = arrayOf(
+                "📱 Compartir por WhatsApp",
+                "📋 Copiar enlace",
+                "✅ Solo OK"
+            )
+
+            AlertDialog.Builder(requireContext())
+                .setTitle("📍 Ubicación Compartida")
+                .setMessage("Enlace: $shareUrl")
+                .setItems(options) { _, which ->
+                    when (which) {
+                        0 -> shareViaWhatsApp(whatsappMessage)
+                        1 -> {
+                            copyToClipboard("Enlace de Ubicación", shareUrl)
+                            showSnackbar("📋 Enlace copiado", Snackbar.LENGTH_SHORT)
+                        }
+                        2 -> { /* OK */ }
+                    }
+                }
+                .show()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Even fallback dialog failed: ${e.message}")
+
+            // ✅ ÚLTIMO RECURSO: Abrir WhatsApp directamente
+            shareViaWhatsApp(whatsappMessage)
+        }
+    }
+
+
+
+
+    private fun startSharingLocation(durationMinutes: Int) {
+        if (!hasLocationPermission()) {
+            showSnackbar("⚠️ Se necesitan permisos de ubicación", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        // Generar ID único para esta sesión de compartir
+        val shareId = "share_${System.currentTimeMillis()}"
+        val durationText = when (durationMinutes) {
+            10 -> "10 minutos"
+            60 -> "1 hora"
+            480 -> "8 horas"
+            -1 -> "hasta que lo detenga"
+            else -> "$durationMinutes minutos"
+        }
+
+        // Crear enlace para compartir
+        val shareUrl = "https://app.socialengeneering.work/track/$shareId"
+
+        val shareMessage = buildString {
+            appendLine("📍 Te estoy compartiendo mi ubicación en tiempo real")
+            appendLine("⏱️ Duración: $durationText")
+            appendLine("🔗 Ver en mapa: $shareUrl")
+            appendLine("")
+            appendLine("🗺️ También puedes abrir con Google Maps:")
+            appendLine("https://maps.google.com/maps?q=${getCurrentLatLng()}")
+            appendLine("")
+            appendLine("📱 Enviado desde Peregrino GPS")
+        }
+
+        // Iniciar servicio de compartir ubicación
+        startLocationSharingService(shareId, durationMinutes)
+
+        // Abrir WhatsApp o compartir
+        shareViaWhatsApp(shareMessage)
+
+        showSnackbar("📍 Compartiendo ubicación por $durationText", Snackbar.LENGTH_LONG)
+    }
+    private fun shareViaWhatsApp(message: String) {
+        try {
+            Log.d(TAG, "📱 Attempting to share via WhatsApp...")
+            Log.d(TAG, "📱 Message: ${message.take(100)}...")
+
+            // ✅ MÉTODO 1: Abrir WhatsApp directamente
+            val whatsappIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, message)
+                setPackage("com.whatsapp")
+            }
+
+            // Verificar si WhatsApp está instalado
+            if (whatsappIntent.resolveActivity(requireActivity().packageManager) != null) {
+                Log.d(TAG, "✅ WhatsApp found, opening...")
+                startActivity(whatsappIntent)
+            } else {
+                Log.w(TAG, "⚠️ WhatsApp not installed, using generic share...")
+                shareViaGeneric(message)
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error sharing via WhatsApp: ${e.message}")
+            shareViaGeneric(message)
+        }
+    }
+
+// ============ 5. COMPARTIR GENÉRICO COMO FALLBACK ============
+
+    private fun shareViaGeneric(message: String) {
+        try {
+            Log.d(TAG, "📤 Using generic share...")
+
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, message)
+                putExtra(Intent.EXTRA_SUBJECT, "📍 Mi ubicación en tiempo real")
+            }
+
+            val chooser = Intent.createChooser(shareIntent, "Compartir ubicación vía...")
+
+            if (chooser.resolveActivity(requireActivity().packageManager) != null) {
+                startActivity(chooser)
+                Log.d(TAG, "✅ Generic share opened")
+            } else {
+                Log.e(TAG, "❌ No apps available for sharing")
+
+                // ✅ ÚLTIMO RECURSO: Copiar al portapapeles
+                copyToClipboard("Ubicación Compartida", message)
+                showSnackbar("📋 Mensaje copiado al portapapeles - Pégalo donde quieras", Snackbar.LENGTH_LONG)
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Even generic share failed: ${e.message}")
+
+            // Fallback final: copiar al portapapeles
+            copyToClipboard("Ubicación Compartida", message)
+            showSnackbar("📋 Copiado al portapapeles", Snackbar.LENGTH_SHORT)
+        }
+    }
+
+// ============ 6. DEBUGGING: AGREGAR LOGS DETALLADOS ============
+
+    // Agregar esta función para debug:
+    private fun debugSharingFlow() {
+        Log.d(TAG, "🔍 DEBUG SHARING FLOW:")
+        Log.d(TAG, "  Fragment valid: ${isFragmentValid()}")
+        Log.d(TAG, "  Context available: ${context != null}")
+        Log.d(TAG, "  Activity available: ${activity != null}")
+        Log.d(TAG, "  Current thread: ${Thread.currentThread().name}")
+        Log.d(TAG, "  isCurrentlySharingLocation: $isCurrentlySharingLocation")
+        Log.d(TAG, "  currentShareId: $currentShareId")
+    }
+
+    private fun stopLocationSharing() {
+        val shareId = currentShareId ?: return
+
+        // Detener servicio
+        val intent = Intent(requireContext(), LocationSharingService::class.java).apply {
+            action = LocationSharingService.ACTION_STOP_SHARING
+        }
+        requireContext().startService(intent)
+
+        // Notificar al servidor
+        lifecycleScope.launch {
+            try {
+                val requestData = JSONObject().apply {
+                    put("shareId", shareId)
+                }
+
+                // ✅ USAR URL HARDCODEADA PARA EVITAR ERRORES
+                val apiUrl = "https://app.socialengeneering.work/api/share/stop-location-sharing"
+
+                val response = makeApiRequest(
+                    apiUrl,
+                    "POST",
+                    requestData.toString()
+                )
+
+                if (response.isSuccessful) {
+                    showSnackbar("🛑 Compartir ubicación detenido", Snackbar.LENGTH_SHORT)
+                } else {
+                    showSnackbar("⚠️ Error deteniendo en servidor", Snackbar.LENGTH_SHORT)
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error stopping sharing on server", e)
+                showSnackbar("⚠️ Error deteniendo compartir: ${e.message}", Snackbar.LENGTH_SHORT)
+            }
+        }
+
+        // Limpiar estado
+        currentShareId = null
+        isCurrentlySharingLocation = false
+        sharingStartTime = 0
+
+        // Actualizar UI
+        updateSharingButton(false, "")
+
+        // Limpiar SharedPreferences
+        sharedPreferences.edit {
+            remove("current_share_id")
+            putBoolean("is_sharing_location", false)
+            remove("sharing_start_time")
+            remove("sharing_duration_minutes")
+        }
+
+        Log.d(TAG, "🛑 Location sharing stopped")
+    }
+    private fun updateSharingButton(isSharing: Boolean, duration: String) {
+        try {
+            // ✅ FIX: buttonShowUbicacion es un CardView, no un TextView
+            // No intentar hacer findViewById en un CardView, sino acceder al TextView directamente
+
+            // Opción 1: Si buttonShowUbicacion tiene un TextView hijo
+            val cardView = binding.buttonShowUbicacion
+            val textView = cardView.findViewById<TextView>(R.id.buttonShowUbicacion) // Buscar el TextView dentro del CardView
+
+            if (textView != null) {
+                textView.text = if (isSharing) {
+                    getString(R.string.stop_sharing)
+                } else {
+                    getString(R.string.start_sharing)
+                }
+            } else {
+                // Opción 2: Si no hay TextView hijo, cambiar el color del CardView solamente
+                Log.w(TAG, "⚠️ No TextView found in buttonShowUbicacion, changing only card color")
+            }
+
+            // ✅ CAMBIAR COLOR DEL CARDVIEW (esto sí funciona)
+            cardView.setCardBackgroundColor(
+                ContextCompat.getColor(
+                    requireContext(),
+                    if (isSharing) android.R.color.holo_red_dark else android.R.color.holo_blue_dark
+                )
+            )
+
+            Log.d(TAG, "✅ Sharing button updated: isSharing=$isSharing")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error updating sharing button: ${e.message}")
+
+            // ✅ FALLBACK: Mostrar snackbar si hay problemas con el botón
+            showSnackbar(
+                if (isSharing) "🔴 Compartiendo ubicación" else "🔵 Compartir detenido",
+                Snackbar.LENGTH_SHORT
+            )
+        }
+    }
+
+
+    private fun restoreSharingState() {
+        // Restaurar estado al iniciar la app
+        val savedShareId = sharedPreferences.getString("current_share_id", null)
+        val isSharingFromPrefs = sharedPreferences.getBoolean("is_sharing_location", false)
+        val startTime = sharedPreferences.getLong("sharing_start_time", 0)
+        val durationMinutes = sharedPreferences.getInt("sharing_duration_minutes", -1)
+
+        if (isSharingFromPrefs && savedShareId != null && startTime > 0) {
+            // Verificar si no ha expirado
+            val elapsed = System.currentTimeMillis() - startTime
+            val shouldExpire = durationMinutes > 0 && elapsed > (durationMinutes * 60 * 1000)
+
+            if (shouldExpire) {
+                // Expirado - limpiar
+                stopLocationSharing()
+            } else {
+                // Restaurar estado activo
+                currentShareId = savedShareId
+                isCurrentlySharingLocation = true
+                sharingStartTime = startTime
+
+                val durationText = if (durationMinutes > 0) {
+                    formatDuration(durationMinutes)
+                } else {
+                    "indefinido"
+                }
+
+                updateSharingButton(true, durationText)
+
+                Log.d(TAG, "📱 Restored sharing state: shareId=$savedShareId")
+            }
+        }
+    }
+
+    private fun formatElapsedTime(elapsedMs: Long): String {
+        val seconds = elapsedMs / 1000
+        val minutes = seconds / 60
+        val hours = minutes / 60
+
+        return when {
+            hours > 0 -> "${hours}h ${minutes % 60}m"
+            minutes > 0 -> "${minutes}m ${seconds % 60}s"
+            else -> "${seconds}s"
+        }
+    }
+
+    private fun formatDuration(minutes: Int): String {
+        return when {
+            minutes < 60 -> "$minutes minutos"
+            minutes < 1440 -> "${minutes / 60} horas"
+            else -> "${minutes / 1440} días"
+        }
+    }
+
+    private suspend fun makeApiRequest(url: String, method: String, body: String? = null): Response {
+        return withContext(Dispatchers.IO) {
+            Log.d(TAG, "🌐 Making API request to: $url")
+
+            // ✅ VERIFICAR JWT_TOKEN ANTES DE HACER LA PETICIÓN
+            val token = JWT_TOKEN
+            if (token.isNullOrEmpty()) {
+                throw Exception("Token de autenticación no disponible")
+            }
+
+            val requestBuilder = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("User-Agent", "PeregrinoGPS/3.0")
+
+            when (method) {
+                "POST" -> {
+                    val requestBody = (body ?: "{}").toRequestBody("application/json".toMediaType())
+                    requestBuilder.post(requestBody)
+                    Log.d(TAG, "📤 POST body: $body")
+                }
+                "PUT" -> {
+                    val requestBody = (body ?: "{}").toRequestBody("application/json".toMediaType())
+                    requestBuilder.put(requestBody)
+                }
+                "DELETE" -> requestBuilder.delete()
+                else -> requestBuilder.get()
+            }
+
+            try {
+                val response = client.newCall(requestBuilder.build()).execute()
+                Log.d(TAG, "📥 Response: ${response.code} ${response.message}")
+                response
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Network error: ${e.message}")
+                throw e
+            }
+        }
+    }
+
+
+
+
+    private fun getCurrentLatLng(): String {
+        return try {
+            val marker = vehicleMarker.get()
+            if (marker != null) {
+                "${marker.position.latitude},${marker.position.longitude}"
+            } else {
+                "$TANDIL_LAT,$TANDIL_LON" // Fallback
+            }
+        } catch (e: Exception) {
+            "$TANDIL_LAT,$TANDIL_LON"
+        }
+    }
+
+    private fun startLocationSharingService(shareId: String, durationMinutes: Int) {
+        // Aquí implementarías el servicio de compartir ubicación
+        // Por ahora, guardamos en SharedPreferences
+        sharedPreferences.edit {
+            putString("sharing_session_id", shareId)
+            putLong("sharing_start_time", System.currentTimeMillis())
+            putInt("sharing_duration_minutes", durationMinutes)
+            putBoolean("is_sharing_location", true)
+        }
+
+        Log.d(TAG, "🌍 Started location sharing: $shareId for $durationMinutes minutes")
+    }
+
+    private fun stopSharingLocation() {
+        sharedPreferences.edit {
+            remove("sharing_session_id")
+            remove("sharing_start_time")
+            remove("sharing_duration_minutes")
+            putBoolean("is_sharing_location", false)
+        }
+
+        showSnackbar("🛑 Compartir ubicación detenido", Snackbar.LENGTH_SHORT)
+        Log.d(TAG, "🛑 Stopped location sharing")
+    }
 
     // ============ FUNCIONES DE SEGUIMIENTO MEJORADAS ============
     private fun toggleVehicleFollowing() {
@@ -740,6 +1673,7 @@ class SecondFragment : Fragment() {
 
         updateFollowButtonText()
     }
+
     private fun clearMyLocationOverlay() {
         try {
             // ✅ DESACTIVAR TEMPORALMENTE MI UBICACIÓN para evitar línea azul
@@ -773,8 +1707,10 @@ class SecondFragment : Fragment() {
             R.color.holo_orange_light
         }
 
-        binding.buttonTestWS.backgroundTintList = ContextCompat.getColorStateList(requireContext(), color)
+        binding.buttonTestWS.backgroundTintList =
+            ContextCompat.getColorStateList(requireContext(), color)
     }
+
     private fun updateFollowButtonText() {
         binding.buttonMyLocation.text = if (isFollowingVehicle.get()) {
             "🎯 Siguiendo"
@@ -792,6 +1728,7 @@ class SecondFragment : Fragment() {
         binding.buttonMyLocation.backgroundTintList =
             ContextCompat.getColorStateList(requireContext(), colorRes)
     }
+
     @SuppressLint("MissingPermission")
     private fun centerOnMyLocation() {
         if (!hasLocationPermission()) {
@@ -821,6 +1758,67 @@ class SecondFragment : Fragment() {
             .addOnFailureListener {
                 showSnackbar("❌ Error obteniendo ubicación GPS", Snackbar.LENGTH_SHORT)
             }
+    }
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun registerWebSocketReceiver() {
+        webSocketReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    "com.peregrino.FORCE_WEBSOCKET_RECONNECT" -> {
+                        Log.d(TAG, "📨 Received force reconnect broadcast")
+                        forceReconnectWebSocket()
+                    }
+                    "com.peregrino.LOCATION_SHARING_STOPPED" -> {
+                        val shareId = intent.getStringExtra("shareId")
+                        Log.d(TAG, "📨 Location sharing stopped: $shareId")
+
+                        // ✅ Actualizar UI
+                        currentShareId = null
+                        isCurrentlySharingLocation = false
+                        updateSharingButton(false, "")
+
+                        showSnackbar("🛑 Compartir ubicación detenido", Snackbar.LENGTH_SHORT)
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction("com.peregrino.FORCE_WEBSOCKET_RECONNECT")
+            addAction("com.peregrino.LOCATION_SHARING_STOPPED")
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.registerReceiver(
+                requireContext(),
+                webSocketReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            ContextCompat.registerReceiver(
+                requireContext(),
+                webSocketReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
+
+        Log.d(TAG, "✅ WebSocket receiver registered")
+    }
+
+    // En onPause(), agregar el desregistro:
+    private fun unregisterWebSocketReceiver() {
+        webSocketReceiver?.let { receiver ->
+            try {
+                requireContext().unregisterReceiver(receiver)
+                Log.d(TAG, "✅ WebSocket receiver unregistered")
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ WebSocket receiver already unregistered: ${e.message}")
+            } finally {
+                webSocketReceiver = null
+            }
+        }
     }
 
     // ============ FUNCIONES AUXILIARES MEJORADAS ============
@@ -857,6 +1855,7 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "❌ Error updating position info: ${e.message}")
         }
     }
+
     private fun handleViewModelError(message: String) {
         if (message.contains("Posición muy antigua ignorada")) {
             handler.postDelayed({
@@ -912,6 +1911,7 @@ class SecondFragment : Fragment() {
         }
         return false
     }
+
     @SuppressLint("MissingPermission")
     private fun enableMyLocation() {
         if (!hasLocationPermission()) {
@@ -948,7 +1948,7 @@ class SecondFragment : Fragment() {
 
             // ✅ REMOVER TODOS LOS OVERLAYS EXCEPTO MARCADORES Y RASTRO DEL VEHÍCULO
             map?.overlays?.removeAll { overlay ->
-                overlay !is Marker  && overlay != safeZonePolygon.get()
+                overlay !is Marker && overlay != safeZonePolygon.get()
             }
             map?.invalidate()
 
@@ -958,7 +1958,6 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "❌ Error cleaning overlays: ${e.message}")
         }
     }
-
 
 
     private fun hasAssociatedDevice(): Boolean {
@@ -976,6 +1975,7 @@ class SecondFragment : Fragment() {
         }
         return hasValidDevice
     }
+
     private fun clearDevicePreferences() {
         sharedPreferences.edit {
             remove(DEVICE_ID_PREF)
@@ -1010,8 +2010,14 @@ class SecondFragment : Fragment() {
             val statusIcon = if (isOnline) "🟢" else "🔴"
             val displayMessage = "$statusIcon $message"
 
-            showSnackbar(displayMessage, if (isOnline) Snackbar.LENGTH_SHORT else Snackbar.LENGTH_LONG)
-            updateStatusUI(displayMessage, if (isOnline) android.R.color.holo_green_dark else android.R.color.holo_red_dark)
+            showSnackbar(
+                displayMessage,
+                if (isOnline) Snackbar.LENGTH_SHORT else Snackbar.LENGTH_LONG
+            )
+            updateStatusUI(
+                displayMessage,
+                if (isOnline) android.R.color.holo_green_dark else android.R.color.holo_red_dark
+            )
 
             if (!isOnline) {
                 handler.postDelayed({ showOfflineHelpDialog() }, 2000)
@@ -1041,6 +2047,7 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "❌ Error starting TrackingService: ${e.message}")
         }
     }
+
     private fun schedulePeriodicSync() {
         val syncWork = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
             .addTag("sync_work")
@@ -1165,6 +2172,7 @@ class SecondFragment : Fragment() {
         // ✅ SETUP PING PERIÓDICO PARA MANTENER CONEXIÓN
         setupWebSocketPing()
     }
+
     private fun setupWebSocketPing() {
         webSocketPingHandler?.removeCallbacksAndMessages(null)
         webSocketPingHandler = Handler(Looper.getMainLooper())
@@ -1198,6 +2206,7 @@ class SecondFragment : Fragment() {
         // ✅ INICIAR PINGS DESPUÉS DE 30 SEGUNDOS
         webSocketPingHandler?.postDelayed(webSocketPingRunnable!!, 30000)
     }
+
     @RequiresApi(Build.VERSION_CODES.O)
     private fun handleWebSocketMessage(message: String) {
         try {
@@ -1214,7 +2223,10 @@ class SecondFragment : Fragment() {
                     // ✅ VERIFICAR QUE ES NUESTRO DISPOSITIVO
                     val ourDeviceId = sharedPreferences.getString(DEVICE_UNIQUE_ID_PREF, null)
                     if (deviceId != ourDeviceId) {
-                        Log.d(TAG, "📍 Position update for different device: $deviceId (ours: $ourDeviceId)")
+                        Log.d(
+                            TAG,
+                            "📍 Position update for different device: $deviceId (ours: $ourDeviceId)"
+                        )
                         return
                     }
 
@@ -1226,23 +2238,34 @@ class SecondFragment : Fragment() {
                         bearing = data.optDouble("course", 0.0),
                         timestamp = System.currentTimeMillis(),
                         accuracy = 10f,
-                        quality = "realtime"
+                        quality = "realtime",
+                        isInterpolated = false // ✅ MARCAR COMO DATOS REALES
                     )
 
-                    Log.d(TAG, "🎯 Real-time position: lat=${position.latitude}, lon=${position.longitude}, speed=${position.speed}")
+                    Log.d(
+                        TAG,
+                        "🎯 REAL-TIME POSITION: lat=${position.latitude}, lon=${position.longitude}, speed=${position.speed}"
+                    )
 
-                    lifecycleScope.launch(Dispatchers.Main) {
+                    // ✅ ACTUALIZAR INMEDIATAMENTE EN HILO PRINCIPAL
+                    activity?.runOnUiThread {
                         updateVehiclePositionEnhanced(position)
 
-                        // ✅ MOSTRAR NOTIFICACIÓN VISUAL DE ACTUALIZACIÓN
-                        showSnackbar("📍 Posición actualizada en tiempo real", Snackbar.LENGTH_SHORT)
+                        // ✅ NOTIFICACIÓN VISUAL MEJORADA
+                        val speedText = if (position.speed > 1) " (${
+                            String.format(
+                                "%.0f",
+                                position.speed
+                            )
+                        } km/h)" else ""
+                        showSnackbar("📍 Posición actualizada${speedText}", Snackbar.LENGTH_SHORT)
                     }
                 }
 
                 "CONNECTION_CONFIRMED" -> {
                     Log.d(TAG, "✅ WebSocket subscription confirmed")
                     activity?.runOnUiThread {
-                        updateConnectionStatus("✅ Suscrito", true)
+                        updateConnectionStatus("✅ En Tiempo Real", true)
                     }
                 }
 
@@ -1287,7 +2310,6 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "❌ Error updating connection status: ${e.message}")
         }
     }
-
 
     private fun updateSafeZoneUI(position: GeoPoint) {
         if (!isMapReady.get()) return
@@ -1365,16 +2387,6 @@ class SecondFragment : Fragment() {
             Log.e(TAG, "❌ Error stopping alarm: ${e.message}")
         }
     }
-
-    @RequiresApi(Build.VERSION_CODES.O)
-    private fun handleSafeZoneButton() {
-        if (safeZone == null || !isSafeZoneActive()) {
-            enterSafeZoneSetupMode()
-        } else {
-            showSafeZoneOptionsDialog()
-        }
-    }
-
 
     @RequiresApi(Build.VERSION_CODES.O)
     private fun enterSafeZoneSetupMode() {
@@ -1462,7 +2474,11 @@ class SecondFragment : Fragment() {
                 )
     }
 
-    private fun createSafeZoneSuccessfully(geoPoint: GeoPoint, deviceUniqueId: String, ageMinutes: Int?) {
+    private fun createSafeZoneSuccessfully(
+        geoPoint: GeoPoint,
+        deviceUniqueId: String,
+        ageMinutes: Int?
+    ) {
         safeZone = geoPoint
         safeZoneCache.set(geoPoint)
         updateSafeZoneUI(geoPoint)
@@ -1475,8 +2491,8 @@ class SecondFragment : Fragment() {
         val ageInfo = when {
             ageMinutes == null -> ""
             ageMinutes < 60 -> " (${ageMinutes}min)"
-            ageMinutes < 1440 -> " (${ageMinutes/60}h)"
-            else -> " (${ageMinutes/1440}d)"
+            ageMinutes < 1440 -> " (${ageMinutes / 60}h)"
+            else -> " (${ageMinutes / 1440}d)"
         }
 
         binding.buttonZonaSegura.apply {
@@ -1557,8 +2573,10 @@ class SecondFragment : Fragment() {
             .setTitle("Asociar Vehículo")
             .setView(dialogView)
             .setPositiveButton("Asociar") { _, _ ->
-                val deviceUniqueId = dialogView.findViewById<EditText>(R.id.editDeviceId).text.toString().trim()
-                val deviceName = dialogView.findViewById<EditText>(R.id.editDeviceName).text.toString().trim()
+                val deviceUniqueId =
+                    dialogView.findViewById<EditText>(R.id.editDeviceId).text.toString().trim()
+                val deviceName =
+                    dialogView.findViewById<EditText>(R.id.editDeviceName).text.toString().trim()
 
                 if (deviceUniqueId.isNotEmpty() && deviceName.isNotEmpty()) {
                     associateDevice(deviceUniqueId, deviceName)
@@ -1761,7 +2779,8 @@ class SecondFragment : Fragment() {
     }
 
     private fun copyToClipboard(label: String, text: String) {
-        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clipboard =
+            requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = ClipData.newPlainText(label, text)
         clipboard.setPrimaryClip(clip)
     }
@@ -1945,7 +2964,8 @@ class SecondFragment : Fragment() {
             snackbar.view.elevation = 50f
             snackbar.view.setBackgroundResource(R.drawable.snackbar_background)
 
-            val textView = snackbar.view.findViewById<TextView>(com.google.android.material.R.id.snackbar_text)
+            val textView =
+                snackbar.view.findViewById<TextView>(com.google.android.material.R.id.snackbar_text)
             textView.setTextColor(ContextCompat.getColor(requireContext(), android.R.color.white))
             textView.textSize = 14f
             textView.maxLines = 3
@@ -1995,16 +3015,18 @@ class SecondFragment : Fragment() {
                         val geoPoint = GeoPoint(position.latitude, position.longitude)
 
                         withContext(Dispatchers.Main) {
-                            updateVehiclePositionEnhanced(TrackingViewModel.VehiclePosition(
-                                deviceId = uniqueId,
-                                latitude = position.latitude,
-                                longitude = position.longitude,
-                                speed = position.speed,
-                                bearing = position.course,
-                                timestamp = System.currentTimeMillis(),
-                                accuracy = 10f,
-                                quality = "initial_load"
-                            ))
+                            updateVehiclePositionEnhanced(
+                                TrackingViewModel.VehiclePosition(
+                                    deviceId = uniqueId,
+                                    latitude = position.latitude,
+                                    longitude = position.longitude,
+                                    speed = position.speed,
+                                    bearing = position.course,
+                                    timestamp = System.currentTimeMillis(),
+                                    accuracy = 10f,
+                                    quality = "initial_load"
+                                )
+                            )
                             showSnackbar("📍 Vehículo cargado en el mapa", Snackbar.LENGTH_SHORT)
                         }
 
@@ -2015,21 +3037,30 @@ class SecondFragment : Fragment() {
 
                         // ✅ FALLBACK: Usar posición antigua si no hay reciente
                         try {
-                            val oldPosition = viewModel.getLastPosition(uniqueId, allowOldPositions = true, maxAgeMinutes = 1440)
+                            val oldPosition = viewModel.getLastPosition(
+                                uniqueId,
+                                allowOldPositions = true,
+                                maxAgeMinutes = 1440
+                            )
                             val geoPoint = GeoPoint(oldPosition.latitude, oldPosition.longitude)
 
                             withContext(Dispatchers.Main) {
-                                updateVehiclePositionEnhanced(TrackingViewModel.VehiclePosition(
-                                    deviceId = uniqueId,
-                                    latitude = oldPosition.latitude,
-                                    longitude = oldPosition.longitude,
-                                    speed = 0.0,
-                                    bearing = 0.0,
-                                    timestamp = System.currentTimeMillis(),
-                                    accuracy = 50f,
-                                    quality = "old_fallback"
-                                ))
-                                showSnackbar("📍 Posición anterior cargada (${oldPosition.age}min)", Snackbar.LENGTH_LONG)
+                                updateVehiclePositionEnhanced(
+                                    TrackingViewModel.VehiclePosition(
+                                        deviceId = uniqueId,
+                                        latitude = oldPosition.latitude,
+                                        longitude = oldPosition.longitude,
+                                        speed = 0.0,
+                                        bearing = 0.0,
+                                        timestamp = System.currentTimeMillis(),
+                                        accuracy = 50f,
+                                        quality = "old_fallback"
+                                    )
+                                )
+                                showSnackbar(
+                                    "📍 Posición anterior cargada (${oldPosition.age}min)",
+                                    Snackbar.LENGTH_LONG
+                                )
                             }
 
                             Log.d(TAG, "✅ Fallback position loaded: ${oldPosition.age} minutes old")
@@ -2037,7 +3068,10 @@ class SecondFragment : Fragment() {
                         } catch (fallbackError: Exception) {
                             Log.e(TAG, "❌ Even fallback failed: ${fallbackError.message}")
                             withContext(Dispatchers.Main) {
-                                showSnackbar("⚠️ No se pudo cargar posición del vehículo", Snackbar.LENGTH_LONG)
+                                showSnackbar(
+                                    "⚠️ No se pudo cargar posición del vehículo",
+                                    Snackbar.LENGTH_LONG
+                                )
                             }
                         }
                     }
@@ -2067,8 +3101,8 @@ class SecondFragment : Fragment() {
         }
     }
 
-// 2. AGREGAR función para forzar carga inicial:
-
+    // 2. AGREGAR función para forzar carga inicial:
+// ============ MEJORAR CARGA INICIAL SIN POSICIONES HARDCODEADAS ============
     @RequiresApi(Build.VERSION_CODES.O)
     private fun forceLoadInitialPosition() {
         val deviceUniqueId = getDeviceUniqueId()
@@ -2083,57 +3117,101 @@ class SecondFragment : Fragment() {
 
         lifecycleScope.launch {
             try {
-                // ✅ ESTRATEGIA MÚLTIPLE para encontrar posición
+                // ✅ ESTRATEGIA MEJORADA: SOLO POSICIONES VÁLIDAS
 
-                // Intento 1: Posición reciente (preferida)
+                // Intento 1: Posición muy reciente (preferida)
                 try {
-                    val recentPosition = viewModel.getLastPosition(deviceUniqueId, allowOldPositions = false, maxAgeMinutes = 30)
-                    displayPositionOnMap(recentPosition, "recent")
-                    return@launch
+                    val recentPosition = viewModel.getLastPosition(
+                        deviceUniqueId,
+                        allowOldPositions = false,
+                        maxAgeMinutes = 15
+                    )
+                    if (isValidPosition(
+                            GeoPoint(
+                                recentPosition.latitude,
+                                recentPosition.longitude
+                            )
+                        )
+                    ) {
+                        displayPositionOnMap(recentPosition, "recent")
+                        return@launch
+                    } else {
+                        Log.d(TAG, "⚠️ Recent position is invalid/hardcoded, skipping")
+                    }
                 } catch (e: Exception) {
-                    Log.d(TAG, "ℹ️ No recent position found: ${e.message}")
+                    Log.d(TAG, "ℹ️ No recent valid position found: ${e.message}")
                 }
 
-                // Intento 2: Posición extendida (1 hora)
+                // Intento 2: Posición extendida válida (1 hora)
                 try {
-                    val extendedPosition = viewModel.getLastPosition(deviceUniqueId, allowOldPositions = true, maxAgeMinutes = 60)
-                    displayPositionOnMap(extendedPosition, "extended")
-                    return@launch
+                    val extendedPosition = viewModel.getLastPosition(
+                        deviceUniqueId,
+                        allowOldPositions = true,
+                        maxAgeMinutes = 60
+                    )
+                    if (isValidPosition(
+                            GeoPoint(
+                                extendedPosition.latitude,
+                                extendedPosition.longitude
+                            )
+                        )
+                    ) {
+                        displayPositionOnMap(extendedPosition, "extended")
+                        return@launch
+                    } else {
+                        Log.d(TAG, "⚠️ Extended position is invalid/hardcoded, skipping")
+                    }
                 } catch (e: Exception) {
-                    Log.d(TAG, "ℹ️ No extended position found: ${e.message}")
+                    Log.d(TAG, "ℹ️ No extended valid position found: ${e.message}")
                 }
 
-                // Intento 3: Cualquier posición disponible (24 horas)
+                // Intento 3: Buscar posición válida en las últimas 24 horas
                 try {
-                    val anyPosition = viewModel.getLastPosition(deviceUniqueId, allowOldPositions = true, maxAgeMinutes = 1440)
-                    displayPositionOnMap(anyPosition, "fallback")
-                    return@launch
+                    val anyPosition = viewModel.getLastPosition(
+                        deviceUniqueId,
+                        allowOldPositions = true,
+                        maxAgeMinutes = 1440
+                    )
+                    if (isValidPosition(GeoPoint(anyPosition.latitude, anyPosition.longitude))) {
+                        displayPositionOnMap(anyPosition, "fallback")
+                        return@launch
+                    } else {
+                        Log.d(TAG, "⚠️ All positions are invalid/hardcoded")
+                    }
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ No position found at all: ${e.message}")
+                    Log.e(TAG, "❌ No valid position found at all: ${e.message}")
                 }
 
-                // Si todo falla, mostrar Tandil como referencia
+                // ✅ Si no hay posiciones válidas, mostrar mensaje y centrar en vista general
                 withContext(Dispatchers.Main) {
-                    val tandilPosition = GeoPoint(TANDIL_LAT, TANDIL_LON)
-                    map?.controller?.animateTo(tandilPosition, OVERVIEW_ZOOM_LEVEL, 1000L)
-                    showSnackbar("❌ No se encontró posición del vehículo. Envía datos GPS primero.", Snackbar.LENGTH_LONG)
-                    binding.textConnectionStatus?.text = "❌ Sin posición GPS"
+                    // ✅ NO CENTRAR EN TANDIL, MANTENER VISTA ACTUAL
+                    map?.controller?.setZoom(OVERVIEW_ZOOM_LEVEL.toDouble())
+                    showSnackbar(
+                        "⚠️ No hay posiciones GPS válidas. Configura tu dispositivo GPS.",
+                        Snackbar.LENGTH_LONG
+                    )
+                    binding.textConnectionStatus?.text = "⚠️ Sin datos GPS válidos"
                 }
 
             } catch (error: Exception) {
                 Log.e(TAG, "❌ Error in force load: ${error.message}")
                 withContext(Dispatchers.Main) {
-                    showSnackbar("❌ Error cargando posición: ${error.message}", Snackbar.LENGTH_LONG)
+                    showSnackbar(
+                        "❌ Error cargando posición: ${error.message}",
+                        Snackbar.LENGTH_LONG
+                    )
                     binding.textConnectionStatus?.text = "❌ Error de carga"
                 }
             }
         }
     }
 
-// 3. FUNCIÓN AUXILIAR para mostrar posición:
-
+    // ============ FUNCIÓN AUXILIAR MEJORADA PARA MOSTRAR POSICIÓN ============
     @RequiresApi(Build.VERSION_CODES.O)
-    private suspend fun displayPositionOnMap(position: TrackingViewModel.LastPositionResponse, strategy: String) {
+    private suspend fun displayPositionOnMap(
+        position: TrackingViewModel.LastPositionResponse,
+        strategy: String
+    ) {
         withContext(Dispatchers.Main) {
             val vehiclePos = TrackingViewModel.VehiclePosition(
                 deviceId = position.deviceId,
@@ -2142,12 +3220,13 @@ class SecondFragment : Fragment() {
                 speed = position.speed,
                 bearing = position.course,
                 timestamp = System.currentTimeMillis(),
-                accuracy = when(strategy) {
+                accuracy = when (strategy) {
                     "recent" -> 10f
                     "extended" -> 25f
                     else -> 50f
                 },
-                quality = strategy
+                quality = strategy,
+                isInterpolated = false // ✅ DATOS REALES
             )
 
             updateVehiclePositionEnhanced(vehiclePos)
@@ -2155,11 +3234,11 @@ class SecondFragment : Fragment() {
             val ageInfo = when {
                 position.age == null -> ""
                 position.age < 60 -> "(${position.age}min)"
-                position.age < 1440 -> "(${position.age/60}h)"
-                else -> "(${position.age/1440}d)"
+                position.age < 1440 -> "(${position.age / 60}h)"
+                else -> "(${position.age / 1440}d)"
             }
 
-            val message = when(strategy) {
+            val message = when (strategy) {
                 "recent" -> "✅ Vehículo encontrado $ageInfo"
                 "extended" -> "📍 Posición anterior cargada $ageInfo"
                 else -> "⚠️ Posición antigua cargada $ageInfo"
@@ -2172,7 +3251,6 @@ class SecondFragment : Fragment() {
         }
     }
 
-
     // ============ BROADCAST RECEIVER PARA ZONA SEGURA ============
     private val safeZoneReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -2181,6 +3259,7 @@ class SecondFragment : Fragment() {
                     clearSafeZoneUI()
                     showSnackbar("🛡️ Zona segura desactivada", Snackbar.LENGTH_LONG)
                 }
+
                 "com.peregrino.SAFEZONE_ALERT" -> {
                     val distance = intent.getDoubleExtra("distance", 0.0)
                     lifecycleScope.launch(Dispatchers.Main) {
@@ -2193,135 +3272,493 @@ class SecondFragment : Fragment() {
             }
         }
     }
+    // ✅ NUEVA FUNCIÓN: FORZAR RECONEXIÓN WEBSOCKET
+    private fun forceReconnectWebSocket() {
+        Log.d(TAG, "🔄 Force reconnecting WebSocket from UI...")
+        viewModel.forceReconnectWebSocket()
+        showSnackbar("🔄 Reconectando en tiempo real...", Snackbar.LENGTH_SHORT)
+    }
 
-    // ============ LIFECYCLE METHODS ============
-    @SuppressLint("UnspecifiedRegisterReceiverFlag")
-    @RequiresApi(Build.VERSION_CODES.O)
-    override fun onResume() {
-        super.onResume()
+    // Llamar este método cuando detectes posiciones incorrectas
+    private fun clearOldGPSData() {
+        lifecycleScope.launch {
+            try {
+                val deviceUniqueId = getDeviceUniqueId()
+                if (deviceUniqueId != null) {
+                    // Llamar al endpoint del servidor para limpiar
+                    val json = JSONObject().apply {
+                        put("deviceId", deviceUniqueId)
+                        put("hoursBack", 4) // Limpiar últimas 4 horas
+                    }
 
-        map?.onResume()
-        shouldReconnect.set(true)
-        // ✅ LIMPIAR OVERLAYS PROBLEMÁTICOS AL RESUMIR
-        handler.postDelayed({
-            cleanupTrackingOverlays()
+                    val requestBody =
+                        json.toString().toRequestBody("application/json".toMediaType())
+                    val request = Request.Builder()
+                        .url("$BASE_URL/api/clear-old-positions")
+                        .post(requestBody)
+                        .addHeader("Authorization", "Bearer $JWT_TOKEN")
+                        .build()
 
-            // Cargar vehículo si no está visible
-            if (vehicleMarker.get() == null && hasAssociatedDevice()) {
-                Log.d(TAG, "🎯 No vehicle visible on resume, loading...")
-                forceLoadInitialPosition()
+                    val response = client.newCall(request).execute()
+                    if (response.isSuccessful) {
+                        showSnackbar(
+                            "🧹 Cache GPS limpiado - Obteniendo datos frescos",
+                            Snackbar.LENGTH_LONG
+                        )
+                        // Forzar actualización
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            viewModel.forceDataRefresh()
+                        }
+                    } else {
+                        showSnackbar("⚠️ Error limpiando cache GPS", Snackbar.LENGTH_SHORT)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error clearing GPS cache: ${e.message}")
             }
-        }, 2000)
-        // ✅ RECONECTAR WEBSOCKET INMEDIATAMENTE
-        if (hasAssociatedDevice() && JWT_TOKEN != null) {
-            handler.postDelayed({
-                Log.d(TAG, "🔄 Reconnecting WebSocket on resume...")
-                setupWebSocket()
-            }, 1000) // 1 segundo de delay
+        }
+    }
+    // ✅ FUNCIÓN PARA REGISTRAR SAFE ZONE RECEIVER
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun registerSafeZoneReceiver() {
+        try {
+            val filter = IntentFilter().apply {
+                addAction("com.peregrino.SAFEZONE_DISABLED")
+                addAction("com.peregrino.SAFEZONE_ALERT")
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.registerReceiver(
+                    requireContext(),
+                    safeZoneReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                requireContext().registerReceiver(safeZoneReceiver, filter)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error registering safe zone receiver: ${e.message}")
+        }
+    }
+
+    // ✅ FUNCIÓN PARA DESREGISTRAR SAFE ZONE RECEIVER
+    private fun unregisterSafeZoneReceiver() {
+        try {
+            requireContext().unregisterReceiver(safeZoneReceiver)
+        } catch (e: Exception) {
+            Log.w(TAG, "Receiver already unregistered: ${e.message}")
+        }
+    }
+
+    // ✅ FUNCIÓN PARA TOGGLE DEL MODO SEGURIDAD (agregar a setupEnhancedButtons)
+    private fun toggleSecurityMode() {
+        if (isSecurityModeActive) {
+            stopSecurityMode()
+        } else {
+            showSecurityModeDialog()
+        }
+    }
+
+    private fun showSecurityModeDialog() {
+        // ✅ VERIFICAR REQUISITOS
+        if (safeZone == null) {
+            showSnackbar("⚠️ Primero establece una zona segura", Snackbar.LENGTH_LONG)
+            return
         }
 
-        // Registrar receiver
+        val deviceUniqueId = getDeviceUniqueId()
+        if (deviceUniqueId == null) {
+            showSnackbar("⚠️ No hay dispositivo asociado", Snackbar.LENGTH_SHORT)
+            return
+        }
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("🛡️ Modo Seguridad")
+            .setMessage("""
+            El Modo Seguridad activará:
+            
+            ✅ Monitoreo 24/7 en segundo plano
+            ✅ Alarma crítica si sale de zona segura
+            ✅ Funciona aunque cierres la app
+            ✅ Resiste reinicios del sistema
+            
+            ⚠️ Consumirá algo de batería para máxima seguridad
+            
+            ¿Activar Modo Seguridad?
+        """.trimIndent())
+            .setPositiveButton("🛡️ Activar Seguridad") { _, _ ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startSecurityMode(deviceUniqueId)
+                }
+            }
+            .setNegativeButton("❌ Cancelar", null)
+            .show()
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun startSecurityMode(deviceUniqueId: String) {
+        val safeZonePosition = safeZone ?: run {
+            showSnackbar("❌ Error: No hay zona segura configurada", Snackbar.LENGTH_LONG)
+            return
+        }
+
+        Log.d(TAG, "🛡️ Starting security mode for device: $deviceUniqueId")
+
+        try {
+            val intent = Intent(requireContext(), BackgroundSecurityService::class.java).apply {
+                action = BackgroundSecurityService.ACTION_START_SECURITY
+                putExtra(BackgroundSecurityService.EXTRA_DEVICE_ID, deviceUniqueId)
+                putExtra(BackgroundSecurityService.EXTRA_JWT_TOKEN, JWT_TOKEN)
+                putExtra(BackgroundSecurityService.EXTRA_SAFE_ZONE_LAT, safeZonePosition.latitude)
+                putExtra(BackgroundSecurityService.EXTRA_SAFE_ZONE_LON, safeZonePosition.longitude)
+                putExtra(BackgroundSecurityService.EXTRA_SAFE_ZONE_RADIUS, 15.0) // 15 metros
+            }
+
+            requireContext().startForegroundService(intent)
+
+            isSecurityModeActive = true
+            updateSecurityButtonUI(true)
+
+            // ✅ GUARDAR ESTADO EN PREFERENCES
+            sharedPreferences.edit {
+                putBoolean("security_mode_active", true)
+                putString("security_device_id", deviceUniqueId)
+            }
+
+            showSnackbar("🛡️ Modo Seguridad ACTIVADO - Vigilancia 24/7", Snackbar.LENGTH_LONG)
+            Log.d(TAG, "✅ Security mode started successfully")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error starting security mode: ${e.message}")
+            showSnackbar("❌ Error activando seguridad: ${e.message}", Snackbar.LENGTH_LONG)
+        }
+    }
+
+    private fun stopSecurityMode() {
+        Log.d(TAG, "🛑 Stopping security mode")
+
+        try {
+            val intent = Intent(requireContext(), BackgroundSecurityService::class.java).apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    action = BackgroundSecurityService.ACTION_STOP_SECURITY
+                }
+            }
+            requireContext().startService(intent)
+
+            isSecurityModeActive = false
+            updateSecurityButtonUI(false)
+
+            // ✅ LIMPIAR ESTADO EN PREFERENCES
+            sharedPreferences.edit {
+                putBoolean("security_mode_active", false)
+                remove("security_device_id")
+            }
+
+            showSnackbar("🛑 Modo Seguridad DESACTIVADO", Snackbar.LENGTH_SHORT)
+            Log.d(TAG, "✅ Security mode stopped")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error stopping security mode: ${e.message}")
+            showSnackbar("❌ Error desactivando seguridad: ${e.message}", Snackbar.LENGTH_SHORT)
+        }
+    }
+
+    private fun updateSecurityButtonUI(isActive: Boolean) {
+        // ✅ ACTUALIZAR BOTÓN DE ZONA SEGURA PARA MOSTRAR ESTADO DE SEGURIDAD
+        binding.buttonZonaSegura.apply {
+            if (isActive) {
+                text = "🛡️ SEGURIDAD ACTIVA"
+                setBackgroundColor(ContextCompat.getColor(requireContext(), android.R.color.holo_red_dark))
+            } else {
+                text = if (safeZone != null) "Zona Segura Activa ✓" else "Establecer Zona Segura"
+                setBackgroundColor(
+                    ContextCompat.getColor(
+                        requireContext(),
+                        if (safeZone != null) android.R.color.holo_green_dark else android.R.color.holo_blue_dark
+                    )
+                )
+            }
+        }
+    }
+
+    // ✅ FUNCIÓN PARA REGISTRAR RECEIVER DE SEGURIDAD
+    private fun registerSecurityReceiver() {
+        securityReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    "com.peregrino.SECURITY_ALERT" -> {
+                        val distance = intent.getDoubleExtra("distance", 0.0)
+                        val deviceId = intent.getStringExtra("deviceId")
+                        val timestamp = intent.getLongExtra("timestamp", System.currentTimeMillis())
+
+                        Log.w(TAG, "🚨 Security alert received: distance=${distance}m, device=$deviceId")
+
+                        // ✅ MOSTRAR ALERTA EN LA APP SI ESTÁ ABIERTA
+                        lifecycleScope.launch(Dispatchers.Main) {
+                            showSnackbar(
+                                "🚨 ALERTA: Vehículo fuera de zona (${distance.toInt()}m)",
+                                Snackbar.LENGTH_LONG
+                            )
+
+                            // ✅ HACER VIBRAR EL TELÉFONO
+                            val vibrator = requireContext().getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                vibrator?.vibrate(VibrationEffect.createOneShot(1000, VibrationEffect.DEFAULT_AMPLITUDE))
+                            }
+                        }
+                    }
+
+                    "com.peregrino.SAFEZONE_DISABLED" -> {
+                        Log.d(TAG, "🛡️ Safe zone disabled from notification")
+                        lifecycleScope.launch(Dispatchers.Main) {
+                            clearSafeZoneUI()
+                            stopSecurityMode()
+                            showSnackbar("🛡️ Zona segura desactivada por alerta", Snackbar.LENGTH_LONG)
+                        }
+                    }
+                }
+            }
+        }
+
         val filter = IntentFilter().apply {
+            addAction("com.peregrino.SECURITY_ALERT")
             addAction("com.peregrino.SAFEZONE_DISABLED")
-            addAction("com.peregrino.SAFEZONE_ALERT")
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.registerReceiver(
                 requireContext(),
-                safeZoneReceiver,
+                securityReceiver,
                 filter,
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
         } else {
-            requireContext().registerReceiver(safeZoneReceiver, filter)
+            requireContext().registerReceiver(securityReceiver, filter)
         }
 
-        // Verificar sesión
+        Log.d(TAG, "✅ Security receiver registered")
+    }
+
+    private fun unregisterSecurityReceiver() {
+        securityReceiver?.let { receiver ->
+            try {
+                requireContext().unregisterReceiver(receiver)
+                Log.d(TAG, "✅ Security receiver unregistered")
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Security receiver already unregistered: ${e.message}")
+            } finally {
+                securityReceiver = null
+            }
+        }
+    }
+
+    // ✅ FUNCIÓN PARA RESTAURAR ESTADO DE SEGURIDAD
+    private fun restoreSecurityState() {
+        isSecurityModeActive = sharedPreferences.getBoolean("security_mode_active", false)
+        if (isSecurityModeActive) {
+            updateSecurityButtonUI(true)
+            Log.d(TAG, "🛡️ Security mode state restored: ACTIVE")
+        }
+    }
+
+    // ✅ MODIFICAR LA FUNCIÓN handleSafeZoneButton EXISTENTE
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun handleSafeZoneButton() {
+        when {
+            isSecurityModeActive -> {
+                // ✅ SI SEGURIDAD ESTÁ ACTIVA, MOSTRAR OPCIONES DE SEGURIDAD
+                MaterialAlertDialogBuilder(requireContext())
+                    .setTitle("🛡️ Modo Seguridad Activo")
+                    .setMessage("El modo seguridad está monitoreando tu vehículo 24/7")
+                    .setPositiveButton("🛑 Desactivar Seguridad") { _, _ ->
+                        stopSecurityMode()
+                    }
+                    .setNeutralButton("🔇 Modo Silencioso") { _, _ ->
+                        enableSilentSecurityMode()
+                    }
+                    .setNegativeButton("❌ Cancelar", null)
+                    .show()
+            }
+
+            safeZone == null || !isSafeZoneActive() -> {
+                // ✅ ESTABLECER NUEVA ZONA SEGURA
+                enterSafeZoneSetupMode()
+            }
+
+            else -> {
+                // ✅ ZONA SEGURA EXISTE, MOSTRAR OPCIONES
+                showSafeZoneOptionsDialog()
+            }
+        }
+    }
+
+    private fun enableSilentSecurityMode() {
+        val intent = Intent(requireContext(), BackgroundSecurityService::class.java).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                action = BackgroundSecurityService.ACTION_SILENT_MODE
+            }
+        }
+        requireContext().startService(intent)
+        showSnackbar("🔇 Modo seguridad silencioso activado", Snackbar.LENGTH_SHORT)
+    }
+    // ============ LIFECYCLE METHODS ============
+    override fun onResume() {
+        super.onResume()
+
+        Log.d(TAG, "▶️ SecondFragment onResume")
+
+        isFragmentResumed = true
+        isFragmentVisible = true
+
+        map?.onResume()
+        shouldReconnect.set(true)
+        // ✅ REGISTRAR RECEIVERS
+        registerSafeZoneReceiver()
+        registerWebSocketReceiver() // ✅ NUEVO
+
+
+        // ✅ REACTIVAR WEBSOCKET
+        if (hasAssociatedDevice()) {
+            handler.postDelayed({
+                Log.d(TAG, "🔌 Reactivating WebSocket on resume...")
+                viewModel.resumeWebSocket()
+
+                if (vehicleMarker.get() == null) {
+                    Log.d(TAG, "🎯 No vehicle visible on resume, loading...")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        forceLoadInitialPosition()
+                    }
+                }
+            }, 1000)
+        }
+
+        // ✅ LIMPIAR OVERLAYS PROBLEMÁTICOS
+        handler.postDelayed({
+            cleanupTrackingOverlays()
+        }, 2000)
+
+        // ✅ REGISTRAR RECEIVER
+        registerSafeZoneReceiver()
+
+        // ✅ VERIFICAR SESIÓN
         val token = sharedPreferences.getString("jwt_token", null)
         if (token == null) {
             navigateToFirstFragment()
         }
 
-        // Reanudar tracking en tiempo real
-        if (hasAssociatedDevice() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            viewModel.startRealTimeTracking()
-        }
+        // ✅ VERIFICAR ESTADO DE COMPARTIR
+        restoreSharingState()
+        registerSecurityReceiver()
+        restoreSecurityState()
     }
 
     override fun onPause() {
         super.onPause()
 
-        map?.onPause()
-        shouldReconnect.set(false)
-        cancelStatusCheck()
+        Log.d(TAG, "⏸️ SecondFragment onPause")
 
-        // Pausar animaciones
+        isFragmentResumed = false
+        // ✅ NO MARCAR COMO NO VISIBLE para mantener updates en background
+
+        map?.onPause()
+
+        // ✅ CRÍTICO: NO CERRAR WEBSOCKET, SOLO PAUSAR
+        Log.d(TAG, "⏸️ Pausing WebSocket (keeping alive)...")
+        viewModel.pauseWebSocket()
+
+        // ✅ PAUSAR ANIMACIONES
         vehicleAnimator?.pause()
         mapRotationAnimator?.pause()
-        // ✅ LIMPIAR WEBSOCKET Y PINGS
-        webSocketPingHandler?.removeCallbacksAndMessages(null)
-        webSocketPingRunnable = null
 
-        // Cerrar WebSocket
-        webSocket?.close(1000, "Fragment pausado")
-        webSocket = null
+        cancelStatusCheck()
 
-        // Desregistrar receiver
-        try {
-            requireContext().unregisterReceiver(safeZoneReceiver)
-        } catch (e: Exception) {
-            Log.w(TAG, "Receiver ya desregistrado: ${e.message}")
+        // ✅ DESREGISTRAR RECEIVER
+        unregisterSafeZoneReceiver()
+        unregisterWebSocketReceiver() // ✅ NUEVO
+        unregisterSecurityReceiver()
+    }
+
+    override fun onStop() {
+        super.onStop()
+
+        Log.d(TAG, "⏹️ SecondFragment onStop")
+
+        // ✅ MARCAR COMO NO VISIBLE SOLO EN onStop
+        isFragmentVisible = false
+
+        // ✅ MANTENER WEBSOCKET VIVO PERO PAUSADO
+        viewModel.keepWebSocketAlive()
+    }
+
+    override fun onStart() {
+        super.onStart()
+
+        Log.d(TAG, "▶️ SecondFragment onStart")
+
+        // ✅ MARCAR COMO VISIBLE
+        isFragmentVisible = true
+
+        // ✅ REACTIVAR WEBSOCKET SI ES NECESARIO
+        if (hasAssociatedDevice()) {
+            Log.d(TAG, "🔌 Reactivating WebSocket on start...")
+            viewModel.resumeWebSocket()
         }
     }
+
 
     override fun onDestroyView() {
         super.onDestroyView()
 
-        // Detener tracking en tiempo real
-        viewModel.stopRealTimeTracking()
+        Log.d(TAG, "🗑️ SecondFragment onDestroyView")
 
-        // Limpiar estado
-        shouldReconnect.set(false)
-        isFollowingVehicle.set(false)
-        safeZoneCenter = null
-        currentVehicleState = VehicleState.NORMAL
+        // ✅ MARCAR COMO NO VISIBLE
+        isFragmentVisible = false
+        isFragmentResumed = false
 
-        // Cancelar handlers
+        // ✅ DETENER SOLO SI LA ACTIVIDAD SE ESTÁ CERRANDO
+        if (requireActivity().isFinishing) {
+            Log.d(TAG, "🛑 Activity finishing, stopping tracking completely")
+            viewModel.stopRealTimeTracking()
+            requireContext().stopService(Intent(requireContext(), TrackingService::class.java))
+        } else {
+            Log.d(TAG, "🔄 Fragment destroyed but activity continuing, keeping WebSocket alive")
+            viewModel.keepWebSocketAlive()
+        }
+
+        // ✅ LIMPIAR HANDLERS
         cancelStatusCheck()
         handler.removeCallbacksAndMessages(null)
 
-        // Cerrar WebSocket
-        webSocket?.close(1000, "Fragment destruido")
-        webSocket = null
-
-        // Detener servicio
-        requireContext().stopService(Intent(requireContext(), TrackingService::class.java))
-
-        // Limpiar mapa
+        // ✅ LIMPIAR MAPA
         myLocationOverlay?.disableMyLocation()
         myLocationOverlay?.disableFollowLocation()
         map?.overlays?.clear()
         map?.onDetach()
 
-        // Cancelar animaciones
+        // ✅ CANCELAR ANIMACIONES
         vehicleAnimator?.cancel()
         mapRotationAnimator?.cancel()
 
-        // Limpiar referencias
+        // ✅ LIMPIAR REFERENCIAS
         vehicleMarker.set(null)
         safeZonePolygon.set(null)
         myLocationOverlay = null
         map = null
 
-        // Limpiar caches
+        // ✅ LIMPIAR CACHES
         deviceInfoCache.clear()
         safeZoneCache.clear()
         lastPositionCache.clear()
 
-        // Solo detener alarma si la app se está cerrando
-        if (requireActivity().isFinishing) {
-            stopAlarmIfActive()
+        // ✅ GUARDAR ESTADO DE COMPARTIR SI ES NECESARIO
+        if (isCurrentlySharingLocation && currentShareId != null) {
+            sharedPreferences.edit {
+                putString("current_share_id", currentShareId)
+                putBoolean("is_sharing_location", true)
+                putLong("sharing_start_time", sharingStartTime)
+            }
+            Log.d(TAG, "💾 Sharing state saved on destroy")
         }
 
         _binding = null

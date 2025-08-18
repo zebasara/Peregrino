@@ -1,64 +1,71 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:orientation="vertical"
     android:padding="24dp"
-    android:background="#FFEB3B"
+    android:background="#FFE53935"
     android:gravity="center">
 
-    <TextView
+    <com.google.android.material.textview.MaterialTextView
         android:id="@+id/alertTitle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="🚨 ALERTA DE VEHÍCULO"
+        android:text="🚨 ALERTA DE SEGURIDAD"
         android:textSize="24sp"
         android:textStyle="bold"
-        android:textColor="#D32F2F"
-        android:textAlignment="center"
+        android:textColor="@android:color/white"
+        android:gravity="center"
         android:layout_marginBottom="16dp" />
 
-    <TextView
-        android:id="@+id/alertMessage"
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="El vehículo ha salido de la zona segura"
-        android:textSize="16sp"
-        android:textColor="#424242"
-        android:textAlignment="center"
-        android:layout_marginBottom="32dp" />
+        app:cardCornerRadius="12dp"
+        app:cardElevation="8dp"
+        android:layout_marginBottom="24dp">
 
-    <Button
+        <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/alertMessage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Mensaje de alerta"
+            android:textSize="16sp"
+            android:textColor="@android:color/black"
+            android:padding="16dp"
+            android:lineSpacingExtra="4dp" />
+
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/buttonStopAlert"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="🔇 SILENCIAR ALARMA"
         android:textSize="16sp"
-        android:backgroundTint="@color/red"
-        android:textColor="#FFFFFF"
-        android:layout_marginBottom="16dp"
-        android:minHeight="48dp" />
+        android:textStyle="bold"
+        app:backgroundTint="@android:color/holo_orange_dark"
+        android:layout_marginBottom="12dp"
+        android:paddingVertical="16dp" />
 
-    <Button
-        android:id="@+id/buttonDisableZone"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="🛡️ DESACTIVAR ZONA SEGURA"
-        android:textSize="16sp"
-        android:backgroundTint="@color/green"
-        android:textColor="#FFFFFF"
-        android:layout_marginBottom="16dp"
-        android:minHeight="48dp" />
-
-    <Button
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/buttonOpenApp"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="📱 ABRIR APP"
         android:textSize="16sp"
-        android:backgroundTint="@color/safe_zone_inactive"
-        android:textColor="#FFFFFF"
-        android:minHeight="48dp" />
+        app:backgroundTint="@android:color/holo_blue_dark"
+        android:layout_marginBottom="12dp"
+        android:paddingVertical="16dp" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonDisableZone"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="🛡️ DESACTIVAR ZONA SEGURA"
+        android:textSize="16sp"
+        app:backgroundTint="@android:color/holo_red_dark"
+        android:paddingVertical="16dp" />
 
 </LinearLayout>

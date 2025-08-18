@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- ✅ PERMISOS BÁSICOS DE UBICACIÓN -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -69,17 +71,39 @@
             </intent-filter>
         </activity>
 
-        <!-- ✅ ACTIVIDAD DE ALARMA CRÍTICA -->
+        <!-- Activity de Alerta Crítica -->
         <activity
             android:name="com.zebass.peregrino.service.AlertActivity"
             android:exported="false"
-            android:screenOrientation="portrait"
-            android:launchMode="singleInstance"
-            android:excludeFromRecents="true"
-            android:theme="@style/Theme.AlertActivity"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:showOnLockScreen="true" />
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleTop" />
+
+        <!-- Receivers para Alertas -->
+        <receiver
+            android:name="com.zebass.peregrino.service.AlertStopReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <receiver
+            android:name="com.zebass.peregrino.service.AlertDisableSafeZoneReceiver"
+            android:enabled="true"
+            android:exported="false" />
+        <service
+            android:name="com.zebass.peregrino.service.BackgroundSecurityService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <service
+            android:name=".service.LocationSharingService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="location"
+            android:permission="android.permission.FOREGROUND_SERVICE" />
 
         <!-- ✅ SERVICIO DE RASTREO EN SEGUNDO PLANO -->
         <service
@@ -94,26 +118,19 @@
             android:name=".service.AlertStopReceiver"
             android:enabled="true"
             android:exported="false" />
-
-        <receiver
-            android:name=".service.AlertDisableSafeZoneReceiver"
-            android:enabled="true"
-            android:exported="false" />
         <receiver
             android:name=".service.AppActionReceiver"
             android:enabled="true"
             android:exported="false" />
         <!-- ✅ RECEIVER PARA REINICIO DEL SISTEMA -->
         <receiver
-            android:name=".service.BootReceiver"
+            android:name="com.zebass.peregrino.service.BootReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter android:priority="1000">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-                <data android:scheme="package" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </receiver>
 
